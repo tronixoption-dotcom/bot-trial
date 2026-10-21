@@ -655,6 +655,21 @@ function Performance({ s }: { s: State }) {
 }
 
 function LossJournal({ s }: { s: State }) {
+  const exportLossLogs = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      source: "deriv-ou-bot-v1",
+      lossLogs: s.lossLogs,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `deriv-loss-logs-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="panel p-4">
       <div className="flex items-center justify-between mb-2">
@@ -664,7 +679,17 @@ function LossJournal({ s }: { s: State }) {
             Structured evidence captured at every losing settlement.
           </p>
         </div>
-        <span className="text-xs text-muted-foreground">{s.lossLogs.length} recorded</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">{s.lossLogs.length} recorded</span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportLossLogs}
+            disabled={!s.lossLogs.length}
+          >
+            Export JSON
+          </Button>
+        </div>
       </div>
       {!s.lossLogs.length ? (
         <p className="text-xs text-muted-foreground">No losses recorded yet.</p>

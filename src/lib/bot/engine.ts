@@ -48,6 +48,7 @@ export interface Config {
   tradeMode: TradeMode;
   minDifference: number;
   doubleConfirmation: boolean;
+  fastEntry: boolean;
   stake: number;
   maxDailyLoss: number;
   maxDrawdown: number;
@@ -229,6 +230,7 @@ export const defaultConfig: Config = {
   tradeMode: "auto-over-under",
   minDifference: 5,
   doubleConfirmation: true,
+  fastEntry: false,
   stake: 1,
   maxDailyLoss: 10,
   maxDrawdown: 10,
@@ -348,10 +350,19 @@ class Engine {
     this.inited = true;
     try {
       const s = JSON.parse(localStorage.getItem(LS) || "null");
-      if (s)
+      if (s) {
+        const config = { ...defaultConfig, ...s.config };
+        // Older saved state could contain an invalid threshold such as 128,
+        // which prevents almost every signal from becoming tradable.
+        config.minDifference =
+          Number.isFinite(config.minDifference) &&
+          config.minDifference >= 0 &&
+          config.minDifference <= 100
+            ? config.minDifference
+            : defaultConfig.minDifference;
         this.set({
           ...s,
-          config: { ...defaultConfig, ...s.config },
+          config,
           lossLogs: Array.isArray(s.lossLogs) ? s.lossLogs : [],
           accumulator: { ...this.state.accumulator, ...(s.accumulator ?? {}) },
           learning: s.learning?.patterns
@@ -365,6 +376,7 @@ class Engine {
             : this.state.learning,
           day: s.day?.date === today() ? s.day : { date: today(), pnl: 0 },
         });
+      }
     } catch {
       /* ignore */
     }
@@ -1067,20 +1079,25 @@ class Engine {
       pass: ev > s.config.minEV,
       detail: `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
     });
-    // Revalidate everything right before purchase
+    // Revalidate everything right before purchase. Fast entry skips only the
+    // duplicate signal checks; proposal and account safety checks remain active.
     const again = this.context(sym);
     const cur = this.state.markets[sym];
     pChecks.push({
       id: "p_same_tick",
       label: "Signal tick still latest",
-      pass: cur?.epochs[cur.epochs.length - 1] === signalEpoch,
-      detail: "No newer tick",
+      pass: s.config.fastEntry || cur?.epochs[cur.epochs.length - 1] === signalEpoch,
+      detail: s.config.fastEntry ? "Skipped in fast-entry mode" : "No newer tick",
     });
     pChecks.push({
       id: "p_revalidate",
-      label: "All entry checks re-pass",
-      pass: again.checks.every((k) => k.pass || k.id === "busy"),
-      detail: again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK",
+      label: "All entry checks and direction re-pass",
+      pass:
+        again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy"),
+      detail:
+        again.direction !== direction
+          ? "Signal direction changed"
+          : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
     });
     pChecks.push({
       id: "p_market",

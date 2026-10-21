@@ -335,6 +335,22 @@ function Controls({ s }: { s: State }) {
             />
           </Field>
         )}
+        {c.tradeMode !== "accumulator" && (
+          <>
+            <Field l="Fast entry mode">
+              <Switch
+                checked={c.fastEntry}
+                onCheckedChange={(v) => engine.updateConfig({ fastEntry: v })}
+              />
+            </Field>
+            {c.fastEntry && (
+              <div className="rounded border border-warning p-2 text-xs text-warning">
+                Fast entry skips only the duplicate signal re-check after an entry is found.
+                Contract, proposal, balance, risk, and purchase safety checks remain active.
+              </div>
+            )}
+          </>
+        )}
         {c.tradeMode === "accumulator" && (
           <div className="rounded border border-warning p-2 text-xs text-warning">
             Accumulator mode is active. The bot will only trade markets that advertise ACCU support,

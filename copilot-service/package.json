@@ -1,0 +1,14 @@
+{
+  "name": "one-tick-trade-guard-copilot-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^1.0.19"
+  }
+}

@@ -27,6 +27,7 @@ import {
   validateAccumulatorProposal,
 } from "./strategy";
 import { DEFAULT_GROQ_MODELS, listGroqModels, requestGroqPlan, requestGroqSignal } from "./groq";
+import { copilotStatus, requestCopilotPlan } from "./copilot";
 
 export const VOL_SYMBOLS = [
   "R_10",
@@ -222,6 +223,9 @@ export interface State {
   ai: {
     enabled: boolean;
     autonomous: boolean;
+    provider: "groq" | "copilot";
+    copilotBaseUrl: string;
+    copilotConnected: boolean;
     configured: boolean;
     model: string;
     models: string[];
@@ -319,6 +323,9 @@ class Engine {
     ai: {
       enabled: false,
       autonomous: false,
+      provider: "groq",
+      copilotBaseUrl: "http://localhost:8787",
+      copilotConnected: false,
       configured: false,
       model: "llama-3.3-70b-versatile",
       models: [...DEFAULT_GROQ_MODELS],
@@ -557,6 +564,63 @@ class Engine {
     });
   }
 
+  setAIProvider(provider: "groq" | "copilot") {
+    if (this.state.status === "running") {
+      this.log("error", "Stop the bot before changing AI providers.");
+      return;
+    }
+    this.set({ ai: { ...this.state.ai, provider, autonomous: false, error: null } });
+  }
+
+  setAIEnabled(enabled: boolean) {
+    if (enabled && !this.state.ai.configured) {
+      this.log("error", "Connect or configure the selected AI provider first.");
+      return;
+    }
+    this.set({
+      ai: {
+        ...this.state.ai,
+        enabled,
+        autonomous: enabled && (this.state.ai.provider === "copilot" || this.state.ai.autonomous),
+      },
+    });
+  }
+
+  setCopilotBaseUrl(baseUrl: string) {
+    this.set({ ai: { ...this.state.ai, copilotBaseUrl: baseUrl.trim().replace(/\/$/, "") } });
+  }
+
+  connectCopilot() {
+    if (typeof window === "undefined") return;
+    window.open(
+      `${this.state.ai.copilotBaseUrl}/auth/login`,
+      "copilot-oauth",
+      "popup,width=600,height=750",
+    );
+  }
+
+  async refreshCopilotStatus() {
+    try {
+      const result = await copilotStatus(this.state.ai.copilotBaseUrl);
+      this.set({
+        ai: {
+          ...this.state.ai,
+          copilotConnected: result.connected,
+          configured: result.connected,
+          error: result.connected ? null : this.state.ai.error,
+        },
+      });
+    } catch (error) {
+      this.set({
+        ai: {
+          ...this.state.ai,
+          copilotConnected: false,
+          error: error instanceof Error ? error.message : "Copilot service unavailable",
+        },
+      });
+    }
+  }
+
   async discoverGroqModels(apiKey: string) {
     const key = apiKey.trim();
     if (!key) return;
@@ -584,8 +648,8 @@ class Engine {
   }
 
   setGroqAutonomous(autonomous: boolean) {
-    if (autonomous && !this.state.ai.enabled) {
-      this.log("error", "Enable and configure Groq before starting autonomous AI mode.");
+    if (autonomous && (!this.state.ai.enabled || !this.state.ai.configured)) {
+      this.log("error", "Enable and configure the selected AI provider before autonomous mode.");
       return;
     }
     this.set({ ai: { ...this.state.ai, autonomous } });
@@ -1235,10 +1299,12 @@ class Engine {
   private evaluateAutonomous() {
     const s = this.state;
     if (!s.account?.isVirtual) {
-      this.halt("Autonomous Groq AI mode is demo-only.");
+      this.halt("Autonomous AI mode is demo-only.");
       return;
     }
-    if (!s.ai.enabled || !this.groqApiKey || s.phase !== "none" || s.ai.busy) return;
+    if (!s.ai.enabled || s.phase !== "none" || s.ai.busy) return;
+    if (s.ai.provider === "groq" && !this.groqApiKey) return;
+    if (s.ai.provider === "copilot" && !s.ai.copilotConnected) return;
     if (Date.now() - this.lastAiPlanAt < 2500 || Date.now() < this.aiRetryAfter) return;
     const now = Date.now();
     const markets = Object.values(s.markets)
@@ -1258,7 +1324,7 @@ class Engine {
     if (!markets.length) return;
     this.lastAiPlanAt = now;
     this.set({ ai: { ...s.ai, busy: true, error: null } });
-    void requestGroqPlan(this.groqApiKey, s.ai.model, {
+    const planInput = {
       markets,
       recentLosses: s.lossLogs.slice(0, 20).map((loss) => ({
         symbol: loss.symbol,
@@ -1270,7 +1336,12 @@ class Engine {
       stake: s.config.stake,
       takeProfit: s.config.dailyProfitTarget,
       stopLoss: s.config.maxDailyLoss,
-    })
+    };
+    const planRequest =
+      s.ai.provider === "copilot"
+        ? requestCopilotPlan(s.ai.copilotBaseUrl, planInput)
+        : requestGroqPlan(this.groqApiKey, s.ai.model, planInput);
+    void planRequest
       .then((plan) => {
         const current = this.state;
         this.aiRetryAfter = 0;
@@ -1324,7 +1395,7 @@ class Engine {
         this.attempt(plan.symbol, direction, market.epochs.at(-1) ?? 0, true);
       })
       .catch((error) => {
-        const detail = error instanceof Error ? error.message : "Groq plan failed";
+        const detail = error instanceof Error ? error.message : "AI plan failed";
         this.aiRetryAfter = Date.now() + 10000;
         this.set({ ai: { ...this.state.ai, busy: false, error: detail } });
         if (detail !== this.lastAiError) {
@@ -2087,11 +2158,14 @@ class Engine {
       return;
     }
     if (s.ai.autonomous && !s.account.isVirtual) {
-      this.log("error", "Groq AI mode is demo-only. Select a virtual account before starting.");
+      this.log(
+        "error",
+        "Autonomous AI mode is demo-only. Select a virtual account before starting.",
+      );
       return;
     }
     if (s.ai.autonomous && !s.ai.enabled) {
-      this.log("error", "Configure and enable Groq before starting autonomous AI mode.");
+      this.log("error", "Configure and enable the selected AI provider before autonomous mode.");
       return;
     }
     if (this.dailyTargetReached()) {

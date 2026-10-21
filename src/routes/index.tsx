@@ -242,11 +242,18 @@ function Controls({ s }: { s: State }) {
   const [confirm, setConfirm] = useState("");
   const [groqKey, setGroqKey] = useState("");
   const [groqModel, setGroqModel] = useState(s.ai.model);
+  const [copilotUrl, setCopilotUrl] = useState(s.ai.copilotBaseUrl);
   const c = s.config;
   const busy = s.phase !== "none";
   useEffect(() => {
     if (s.ai.configured) setGroqModel(s.ai.model);
   }, [s.ai.configured, s.ai.model]);
+  useEffect(() => {
+    if (s.ai.provider !== "copilot") return;
+    void engine.refreshCopilotStatus();
+    const timer = window.setInterval(() => void engine.refreshCopilotStatus(), 2000);
+    return () => window.clearInterval(timer);
+  }, [s.ai.provider, s.ai.copilotBaseUrl]);
   const num = (k: keyof typeof c) => (e: React.ChangeEvent<HTMLInputElement>) =>
     engine.updateConfig({ [k]: Number(e.target.value) } as never);
   return (
@@ -303,10 +310,36 @@ function Controls({ s }: { s: State }) {
       </div>
 
       <div className="panel p-4 space-y-2">
-        <h3 className="label-xs">Groq AI gate</h3>
+        <h3 className="label-xs">AI provider</h3>
+        <select
+          className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+          value={s.ai.provider}
+          disabled={s.status === "running"}
+          onChange={(e) => engine.setAIProvider(e.target.value as "groq" | "copilot")}
+        >
+          <option value="groq">Groq</option>
+          <option value="copilot">GitHub Copilot</option>
+        </select>
+        {s.ai.provider === "copilot" && (
+          <>
+            <Input
+              placeholder="Copilot service URL"
+              value={copilotUrl}
+              onChange={(e) => setCopilotUrl(e.target.value)}
+              onBlur={() => engine.setCopilotBaseUrl(copilotUrl)}
+            />
+            <Button variant="outline" className="w-full" onClick={() => engine.connectCopilot()}>
+              {s.ai.copilotConnected ? "GitHub Copilot connected" : "Connect GitHub Copilot"}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              GitHub OAuth opens in a browser. The Copilot token stays in the Node service.
+            </p>
+          </>
+        )}
+        <h3 className="label-xs">AI configuration</h3>
         <p className="text-xs text-muted-foreground">
-          Groq may approve or reject the existing signal. It cannot bypass EV, proposal, balance,
-          risk, stake, or contract checks. The key is memory-only and is cleared on page reload.
+          The selected AI chooses plans, but cannot bypass EV, proposal, balance, risk, stake, or
+          contract checks. Groq keys are memory-only.
         </p>
         <Input
           type="password"
@@ -342,8 +375,14 @@ function Controls({ s }: { s: State }) {
         />
         <Switch
           checked={s.ai.enabled}
-          disabled={!groqKey && !s.ai.configured}
-          onCheckedChange={(enabled) => engine.configureGroq(groqKey, groqModel, enabled)}
+          disabled={
+            s.ai.provider === "groq" ? !groqKey && !s.ai.configured : !s.ai.copilotConnected
+          }
+          onCheckedChange={(enabled) =>
+            s.ai.provider === "groq"
+              ? engine.configureGroq(groqKey, groqModel, enabled)
+              : engine.setAIEnabled(enabled)
+          }
         />
         <Field l="Autonomous AI strategy (demo only)">
           <Switch

@@ -142,7 +142,7 @@ async function copilotPlan(session, input) {
     clients.set(session.id, client);
   }
   const copilotSession = await client.createSession({
-    model: process.env.COPILOT_MODEL || "gpt-5.4",
+    model: input.model || process.env.COPILOT_MODEL || "gpt-5.4",
     // Empty mode requires every session to explicitly declare its tools.
     // This planner does not need filesystem, shell, or other tools.
     availableTools: [],
@@ -159,6 +159,23 @@ async function copilotPlan(session, input) {
   } finally {
     await copilotSession.disconnect().catch(() => {});
   }
+}
+
+async function copilotModels(session) {
+  let client = clients.get(session.id);
+  if (!client) {
+    client = new CopilotClient({
+      mode: "empty",
+      gitHubToken: session.token,
+      workingDirectory: "/tmp",
+      baseDirectory: "/tmp/copilot",
+      logLevel: "error",
+    });
+    await withTimeout(client.start(), 45_000, "Copilot runtime startup timed out");
+    clients.set(session.id, client);
+  }
+  const models = await withTimeout(client.listModels(), 45_000, "Copilot model list timed out");
+  return models.map(({ id, name }) => ({ id, name }));
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -234,10 +251,16 @@ export async function handler(request, response) {
       const session = sessionFor(request);
       return send(response, 200, { connected: !!session, login: session?.login ?? null });
     }
+    if (url.pathname === "/api/models") {
+      const session = sessionFor(request);
+      if (!session) return send(response, 401, { error: "Connect GitHub Copilot first" });
+      return send(response, 200, { models: await copilotModels(session) });
+    }
     if (url.pathname === "/api/plan" && request.method === "POST") {
       const session = sessionFor(request);
       if (!session) return send(response, 401, { error: "Connect GitHub Copilot first" });
-      const plan = await copilotPlan(session, await jsonBody(request));
+      const { model, ...input } = await jsonBody(request);
+      const plan = await copilotPlan(session, { ...input, model });
       return send(response, 200, plan);
     }
     send(response, 404, { error: "Not found" });

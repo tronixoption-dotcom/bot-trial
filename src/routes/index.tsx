@@ -379,6 +379,21 @@ function Controls({ s }: { s: State }) {
             />
           </>
         )}
+        {s.ai.provider === "copilot" && (
+          <select
+            className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+            value={s.ai.model}
+            disabled={!s.ai.copilotConnected || s.ai.busy || !s.ai.models.length}
+            onChange={(e) => engine.setAIModel(e.target.value)}
+          >
+            {!s.ai.models.length && <option value="">Loading Copilot models...</option>}
+            {s.ai.models.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
+        )}
         <Switch
           checked={s.ai.enabled}
           disabled={

@@ -27,7 +27,7 @@ import {
   validateAccumulatorProposal,
 } from "./strategy";
 import { DEFAULT_GROQ_MODELS, listGroqModels, requestGroqPlan, requestGroqSignal } from "./groq";
-import { copilotStatus, requestCopilotPlan } from "./copilot";
+import { copilotModels, copilotStatus, requestCopilotPlan } from "./copilot";
 
 const DEFAULT_COPILOT_BASE_URL =
   (import.meta.env.VITE_COPILOT_BASE_URL as string | undefined)?.trim().replace(/\/$/, "") ||
@@ -573,7 +573,16 @@ class Engine {
       this.log("error", "Stop the bot before changing AI providers.");
       return;
     }
-    this.set({ ai: { ...this.state.ai, provider, autonomous: false, error: null } });
+    this.set({
+      ai: {
+        ...this.state.ai,
+        provider,
+        autonomous: false,
+        error: null,
+        models: provider === "copilot" ? [] : this.state.ai.models,
+        model: provider === "copilot" ? "" : this.state.ai.model,
+      },
+    });
     if (provider === "copilot" && !this.state.ai.copilotConnected) {
       this.connectCopilot();
     }
@@ -593,6 +602,10 @@ class Engine {
     });
   }
 
+  setAIModel(model: string) {
+    this.set({ ai: { ...this.state.ai, model: model.trim() } });
+  }
+
   setCopilotBaseUrl(baseUrl: string) {
     this.set({ ai: { ...this.state.ai, copilotBaseUrl: baseUrl.trim().replace(/\/$/, "") } });
   }
@@ -609,7 +622,8 @@ class Engine {
   async refreshCopilotStatus() {
     try {
       const result = await copilotStatus(this.state.ai.copilotBaseUrl);
-      const newlyConnected = result.connected && !this.state.ai.copilotConnected;
+      const wasConnected = this.state.ai.copilotConnected;
+      const newlyConnected = result.connected && !wasConnected;
       this.set({
         ai: {
           ...this.state.ai,
@@ -619,6 +633,19 @@ class Engine {
           error: result.connected ? null : this.state.ai.error,
         },
       });
+      if (result.connected && (newlyConnected || !this.state.ai.models.length)) {
+        const modelResult = await copilotModels(this.state.ai.copilotBaseUrl);
+        const models = modelResult.models.map((model) => model.id).filter(Boolean);
+        if (models.length) {
+          this.set({
+            ai: {
+              ...this.state.ai,
+              models,
+              model: models.includes(this.state.ai.model) ? this.state.ai.model : models[0],
+            },
+          });
+        }
+      }
     } catch (error) {
       this.set({
         ai: {
@@ -1348,7 +1375,7 @@ class Engine {
     };
     const planRequest =
       s.ai.provider === "copilot"
-        ? requestCopilotPlan(s.ai.copilotBaseUrl, planInput)
+        ? requestCopilotPlan(s.ai.copilotBaseUrl, s.ai.model, planInput)
         : requestGroqPlan(this.groqApiKey, s.ai.model, planInput);
     void planRequest
       .then((plan) => {

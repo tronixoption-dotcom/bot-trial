@@ -17,12 +17,14 @@ import {
   CONTRACTS,
   CONTRACT_DURATION,
   DURATION_UNIT,
+  buildAccumulatorProposalRequest,
   learningBlock,
   type Analysis,
   type BacktestResult,
   type Check,
   type Direction,
   type LearningPattern,
+  validateAccumulatorProposal,
 } from "./strategy";
 
 export const VOL_SYMBOLS = [
@@ -45,6 +47,7 @@ export interface Config {
   appId: string;
   tradeMode: TradeMode;
   minDifference: number;
+  doubleConfirmation: boolean;
   stake: number;
   maxDailyLoss: number;
   maxDrawdown: number;
@@ -73,6 +76,8 @@ export interface Market {
   analysis: Analysis;
   confirm: Analysis;
   reject: string;
+  accumulatorSupported: boolean;
+  accumulatorGrowthRates: number[];
 }
 export interface TradeRec {
   id: string;
@@ -86,6 +91,10 @@ export interface TradeRec {
   won: boolean;
   virtual: boolean;
   contractId: number;
+  strategy?: "over-under" | "accumulator";
+  growthRate?: number;
+  cashOutTarget?: number;
+  exitReason?: string;
 }
 export interface CycleRec {
   start: number;
@@ -167,6 +176,17 @@ export interface State {
   phase: Phase;
   currentDirection: Direction | null;
   contractId: number | null;
+  contractMode: "over-under" | "accumulator" | null;
+  accumulator: {
+    growthRate: number | null;
+    target: number | null;
+    currentValue: number | null;
+    peakValue: number | null;
+    soldFor: number | null;
+    sellRequested: boolean;
+    recoveryOutstanding: number;
+    totalRecovered: number;
+  };
   lastSettledAt: number;
   cycle: {
     start: number;
@@ -208,6 +228,7 @@ export const defaultConfig: Config = {
   appId: "",
   tradeMode: "auto-over-under",
   minDifference: 5,
+  doubleConfirmation: true,
   stake: 1,
   maxDailyLoss: 10,
   maxDrawdown: 10,
@@ -242,6 +263,17 @@ class Engine {
     phase: "none",
     currentDirection: null,
     contractId: null,
+    contractMode: null,
+    accumulator: {
+      growthRate: null,
+      target: null,
+      currentValue: null,
+      peakValue: null,
+      soldFor: null,
+      sellRequested: false,
+      recoveryOutstanding: 0,
+      totalRecovered: 0,
+    },
     lastSettledAt: 0,
     cycle: null,
     day: { date: today(), pnl: 0 },
@@ -279,8 +311,18 @@ class Engine {
     this.listeners.forEach((l) => l());
   }
   private persist() {
-    const { config, trades, cycles, lossLogs, logs, day, consecLosses, backtestDone, learning } =
-      this.state;
+    const {
+      config,
+      trades,
+      cycles,
+      lossLogs,
+      logs,
+      day,
+      consecLosses,
+      backtestDone,
+      learning,
+      accumulator,
+    } = this.state;
     try {
       localStorage.setItem(
         LS,
@@ -294,6 +336,7 @@ class Engine {
           consecLosses,
           backtestDone,
           learning,
+          accumulator,
         }),
       );
     } catch {
@@ -310,6 +353,7 @@ class Engine {
           ...s,
           config: { ...defaultConfig, ...s.config },
           lossLogs: Array.isArray(s.lossLogs) ? s.lossLogs : [],
+          accumulator: { ...this.state.accumulator, ...(s.accumulator ?? {}) },
           learning: s.learning?.patterns
             ? {
                 total: Number(s.learning.total ?? 0),
@@ -613,12 +657,43 @@ class Engine {
         analysis: emptyA,
         confirm: emptyA,
         reject: "Loading history",
+        accumulatorSupported: false,
+        accumulatorGrowthRates: [],
       };
     this.set({ markets });
     await this.send({ forget_all: "ticks" });
     const count = Math.max(this.state.config.sampleSize + 2, 1000);
     await Promise.all(
       Object.keys(markets).map(async (sym) => {
+        const cf = await this.send({ contracts_for: sym });
+        const available = Array.isArray(cf.contracts_for?.available)
+          ? cf.contracts_for.available
+          : [];
+        const accumulatorContract = available.find(
+          (x: any) =>
+            String(x.contract_type ?? "").toUpperCase() === "ACCU" ||
+            /accumulator/i.test(String(x.contract_category ?? "")),
+        );
+        const rates = (accumulatorContract?.growth_rate ??
+          accumulatorContract?.growth_rates ??
+          []) as unknown;
+        const accumulatorGrowthRates = Array.isArray(rates)
+          ? rates.map(Number).filter((x: number) => Number.isFinite(x) && x > 0)
+          : typeof rates === "number" || typeof rates === "string"
+            ? [Number(rates)].filter((x) => Number.isFinite(x) && x > 0)
+            : [];
+        const current = this.state.markets[sym];
+        if (current)
+          this.set({
+            markets: {
+              ...this.state.markets,
+              [sym]: {
+                ...current,
+                accumulatorSupported: !!accumulatorContract,
+                accumulatorGrowthRates,
+              },
+            },
+          });
         const h = await this.send({
           ticks_history: sym,
           count,
@@ -786,7 +861,6 @@ class Engine {
     const rawAnalysis = m?.analysis ?? emptyA;
     const rawConfirm = m?.confirm ?? emptyA;
     const modeAnalysis = (analysis: Analysis): Analysis => {
-      if (c.tradeMode === "accumulator") return emptyA;
       if (c.tradeMode === "over-only" && analysis.direction !== "OVER2")
         return { ...analysis, qualifies: false, direction: null };
       if (c.tradeMode === "under-only" && analysis.direction !== "UNDER7")
@@ -812,6 +886,8 @@ class Engine {
       cooldownRemainingMs: s.lastSettledAt + c.cooldownSec * 1000 - now,
       realAccountBlocked: !!s.account && !s.account.isVirtual && !s.realEnabled,
       minDifference: c.minDifference,
+      checkEntryDigit: c.tradeMode !== "accumulator",
+      requireConfirmation: c.tradeMode === "accumulator" ? true : c.doubleConfirmation,
       learningBlock: this.learnedBlock(
         sym,
         m?.analysis.direction ?? null,
@@ -827,8 +903,35 @@ class Engine {
       return;
     }
     if (s.config.tradeMode === "accumulator") {
-      const msg =
-        "ACCUMULATOR selected — no purchase made while the accumulator module is being validated.";
+      const accumulatorSymbol = s.active;
+      const accumulatorMarket = s.markets[accumulatorSymbol];
+      const accumulatorContext = this.context(accumulatorSymbol);
+      const accumulatorRisk = accumulatorContext.checks.find((check) => check.id === "risk");
+      const accumulatorFunds = accumulatorContext.checks.find((check) => check.id === "funds");
+      if (
+        accumulatorRisk &&
+        !accumulatorRisk.pass &&
+        !accumulatorRisk.detail.startsWith("Bot is")
+      ) {
+        this.set({ checks: accumulatorContext.checks });
+        this.halt(accumulatorRisk.detail);
+        return;
+      }
+      if (accumulatorFunds && !accumulatorFunds.pass && s.account) {
+        this.set({ checks: accumulatorContext.checks });
+        this.halt("Balance cannot cover the fixed stake");
+        return;
+      }
+      if (
+        accumulatorMarket?.accumulatorSupported &&
+        accumulatorContext.direction &&
+        accumulatorContext.checks.every((check) => check.pass)
+      ) {
+        this.set({ checks: accumulatorContext.checks });
+        this.attemptAccumulator(accumulatorSymbol, accumulatorContext.direction);
+        return;
+      }
+      const msg = "ACCUMULATOR waiting — no supported, fully validated opportunity is available.";
       if (msg !== this.lastReject) {
         this.lastReject = msg;
         this.log("reject", msg);
@@ -864,6 +967,78 @@ class Engine {
     this.attempt(sym, direction, m.epochs[m.epochs.length - 1]);
   }
 
+  private selectAccumulatorGrowthRate(m: Market) {
+    const configured = this.state.config.accumulatorGrowthRate;
+    if (!this.state.config.accumulatorAutoGrowth)
+      return m.accumulatorGrowthRates.includes(configured) ? configured : null;
+    return m.accumulatorGrowthRates.length ? Math.min(...m.accumulatorGrowthRates) : null;
+  }
+
+  private async attemptAccumulator(sym: string, signal: Direction) {
+    const s = this.state;
+    const m = s.markets[sym];
+    if (!m || s.phase !== "none") return;
+    const growthRate = this.selectAccumulatorGrowthRate(m);
+    if (growthRate === null) {
+      const msg = `[${sym}] ACCUMULATOR REJECTED — no validated growth rate is available.`;
+      if (msg !== this.lastReject) {
+        this.lastReject = msg;
+        this.log("reject", msg);
+      }
+      return;
+    }
+    const stake = s.config.stake;
+    const entryChecks = this.context(sym).checks;
+    this.set({
+      phase: "proposing",
+      currentDirection: signal,
+      contractMode: "accumulator",
+      proposalChecks: [],
+    });
+    const req = buildAccumulatorProposalRequest(sym, stake, s.account!.currency, growthRate);
+    const res = await this.send(req, 3000);
+    const checks = validateAccumulatorProposal(res, { symbol: sym, stake, growthRate });
+    this.set({ proposalChecks: checks });
+    const failed = checks.find((check) => !check.pass);
+    if (failed) {
+      if (res.proposal?.id) this.send({ forget: res.proposal.id });
+      this.set({ phase: "none", currentDirection: null, contractMode: null });
+      this.log("reject", `ACCUMULATOR REJECTED — ${failed.label}: ${failed.detail}.`);
+      return;
+    }
+    this.pendingAccumulatorMeta = {
+      symbol: sym,
+      direction: signal,
+      stake,
+      growthRate,
+      target: stake * s.config.accumulatorCashOutMultiplier,
+      entryChecks,
+      startedAt: Date.now(),
+    };
+    this.set({ phase: "buying" });
+    this.log(
+      "exec",
+      `ACCUMULATOR PROPOSAL ACCEPTED — ${sym}, growth ${(growthRate * 100).toFixed(2)}%, target ${(stake * s.config.accumulatorCashOutMultiplier).toFixed(2)}.`,
+    );
+    const bought = await this.send({ buy: res.proposal!.id, price: stake }, 10000);
+    if (bought.error) {
+      if (bought.error.code === "Timeout" || bought.error.message === "Connection closed") {
+        this.set({ phase: "reconciling" });
+        this.log(
+          "error",
+          "Accumulator purchase response delayed — reconciling before any new trade.",
+        );
+        this.reconcile();
+        return;
+      }
+      this.pendingAccumulatorMeta = null;
+      this.set({ phase: "none", currentDirection: null, contractMode: null });
+      this.log("error", `Accumulator purchase failed: ${bought.error.message}`);
+      return;
+    }
+    this.trackAccumulator(Number(bought.buy.contract_id));
+  }
+
   private async attempt(sym: string, direction: Direction, signalEpoch: number) {
     const s = this.state;
     const m = s.markets[sym];
@@ -873,7 +1048,12 @@ class Engine {
     const digits = m.quotes.slice(-s.config.sampleSize).map((q) => lastDigit(q, m.pip));
     const dist = digitDistribution(digits);
     const stake = s.config.stake;
-    this.set({ phase: "proposing", currentDirection: direction, proposalChecks: [] });
+    this.set({
+      phase: "proposing",
+      currentDirection: direction,
+      contractMode: "over-under",
+      proposalChecks: [],
+    });
     const req = buildProposalRequest(direction, sym, stake, s.account!.currency);
     const proposalSentAt = Date.now();
     const res = await this.send(req, 3000);
@@ -913,7 +1093,7 @@ class Engine {
     if (failed) {
       if (res.proposal?.id) this.send({ forget: res.proposal.id });
       this.lastDecisionMeta = null;
-      this.set({ phase: "none", currentDirection: null });
+      this.set({ phase: "none", currentDirection: null, contractMode: null });
       this.log(
         failed.id === "p_duration" || failed.id === "p_unit" ? "error" : "reject",
         `${CONTRACTS[direction].label} REJECTED — ${failed.label}: ${failed.detail}.`,
@@ -947,7 +1127,7 @@ class Engine {
         return;
       }
       this.lastDecisionMeta = null;
-      this.set({ phase: "none", currentDirection: null });
+      this.set({ phase: "none", currentDirection: null, contractMode: null });
       this.log("error", `Purchase failed: ${b.error.message}`);
       return;
     }
@@ -955,6 +1135,15 @@ class Engine {
   }
 
   private lastDecisionMeta: DecisionMeta | null = null;
+  private pendingAccumulatorMeta: {
+    symbol: string;
+    direction: Direction;
+    stake: number;
+    growthRate: number;
+    target: number;
+    entryChecks: Check[];
+    startedAt: number;
+  } | null = null;
   private pendingMeta = new Map<
     number,
     DecisionMeta & { direction: Direction; symbol: string; digit: number }
@@ -983,7 +1172,7 @@ class Engine {
       });
     }
     this.lastDecisionMeta = null;
-    this.set({ phase: "open", contractId });
+    this.set({ phase: "open", contractId, contractMode: "over-under" });
     this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 });
   }
 
@@ -999,6 +1188,30 @@ class Engine {
       this.state.config.stake,
       this.state.config.stake * 1.33,
     );
+  }
+
+  private trackAccumulator(contractId: number) {
+    const meta = this.pendingAccumulatorMeta;
+    const fallback = {
+      growthRate: this.state.config.accumulatorGrowthRate,
+      target: this.state.config.stake * this.state.config.accumulatorCashOutMultiplier,
+      stake: this.state.config.stake,
+    };
+    this.set({
+      phase: "open",
+      contractId,
+      contractMode: "accumulator",
+      accumulator: {
+        ...this.state.accumulator,
+        growthRate: meta?.growthRate ?? fallback.growthRate,
+        target: meta?.target ?? fallback.target,
+        currentValue: meta?.stake ?? fallback.stake,
+        peakValue: meta?.stake ?? fallback.stake,
+        soldFor: null,
+        sellRequested: false,
+      },
+    });
+    this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 });
   }
 
   private createLossLog(c: any, rec: TradeRec, meta: ReturnType<Engine["getLossMeta"]>): LossLog {
@@ -1087,7 +1300,8 @@ class Engine {
     const open = (pf.portfolio?.contracts ?? []).find((c: any) => c.purchase_time >= since);
     if (open) {
       this.log("info", `Reconciled open contract ${open.contract_id}.`);
-      this.track(open.contract_id);
+      if (this.state.contractMode === "accumulator") this.trackAccumulator(open.contract_id);
+      else this.track(open.contract_id);
       return;
     }
     const pt = await this.send({ profit_table: 1, limit: 5, description: 1, sort: "DESC" });
@@ -1098,15 +1312,179 @@ class Engine {
     const done = (pt.profit_table?.transactions ?? []).find((c: any) => c.purchase_time >= since);
     if (done) {
       this.log("info", `Reconciled settled contract ${done.contract_id}.`);
-      this.track(done.contract_id);
+      if (this.state.contractMode === "accumulator") this.trackAccumulator(done.contract_id);
+      else this.track(done.contract_id);
       return;
     }
     this.log("info", "Reconciled: no purchase was made.");
-    this.set({ phase: "none", currentDirection: null });
+    this.pendingAccumulatorMeta = null;
+    this.set({ phase: "none", currentDirection: null, contractMode: null });
+  }
+
+  private onAccumulatorContract(c: any) {
+    if (c.contract_id !== this.state.contractId) return;
+    const s = this.state;
+    const meta = this.pendingAccumulatorMeta;
+    const currentValue = Number(c.bid_price ?? c.sell_price ?? c.contract_value ?? c.payout ?? 0);
+    if (!c.is_sold) {
+      const current =
+        Number.isFinite(currentValue) && currentValue > 0
+          ? currentValue
+          : s.accumulator.currentValue;
+      this.set({
+        accumulator: {
+          ...s.accumulator,
+          currentValue: current,
+          peakValue: Math.max(s.accumulator.peakValue ?? 0, current ?? 0),
+        },
+      });
+      const target = s.accumulator.target;
+      if (target && current && current >= target && !s.accumulator.sellRequested) {
+        this.set({ accumulator: { ...this.state.accumulator, sellRequested: true } });
+        this.log(
+          "exec",
+          `ACCUMULATOR TARGET REACHED — value ${current.toFixed(2)} / target ${target.toFixed(2)}. Requesting sale.`,
+        );
+        this.send({ sell: c.contract_id, price: current }, 5000).then((result) => {
+          if (result.error)
+            this.log(
+              "error",
+              `Accumulator sale response failed: ${result.error.message}. Contract remains under reconciliation.`,
+            );
+          else
+            this.set({
+              accumulator: {
+                ...this.state.accumulator,
+                soldFor: Number(result.sell?.sold_for ?? current),
+              },
+            });
+        });
+      }
+      return;
+    }
+    const stake = meta?.stake ?? s.config.stake;
+    const soldFor = Number(
+      c.sell_price ?? c.sold_for ?? c.bid_price ?? stake + Number(c.profit ?? 0),
+    );
+    const profit = Number.isFinite(Number(c.profit)) ? Number(c.profit) : soldFor - stake;
+    const won = profit > 0;
+    const direction = meta?.direction ?? s.currentDirection ?? "OVER2";
+    const rec: TradeRec = {
+      id: String(c.contract_id),
+      time: Date.now(),
+      symbol: meta?.symbol ?? s.active,
+      direction,
+      entryDigit: -1,
+      stake,
+      payout: soldFor,
+      profit,
+      won,
+      virtual: !!s.account?.isVirtual,
+      contractId: c.contract_id,
+      strategy: "accumulator",
+      growthRate: meta?.growthRate,
+      cashOutTarget: meta?.target,
+      exitReason: s.accumulator.sellRequested ? "target-cash-out" : "contract-terminated",
+    };
+    if (s.trades.some((trade) => trade.id === rec.id)) return;
+    const cycle = s.cycle
+      ? {
+          ...s.cycle,
+          profit: s.cycle.profit + profit,
+          wins: s.cycle.wins + (won ? 1 : 0),
+          losses: s.cycle.losses + (won ? 0 : 1),
+          tradeIds: [...s.cycle.tradeIds, rec.id],
+        }
+      : null;
+    if (cycle) cycle.peak = Math.max(cycle.peak, cycle.start + cycle.profit);
+    const day =
+      s.day.date === today()
+        ? { ...s.day, pnl: s.day.pnl + profit }
+        : { date: today(), pnl: profit };
+    const recovered = profit > 0 ? Math.min(s.accumulator.recoveryOutstanding, profit) : 0;
+    const recoveryOutstanding = s.config.accumulatorRecoveryMode
+      ? Math.max(0, s.accumulator.recoveryOutstanding - recovered) +
+        (profit < 0 ? Math.abs(profit) : 0)
+      : s.accumulator.recoveryOutstanding;
+    const accumulatorMarket = s.markets[meta?.symbol ?? s.active];
+    const lossLog: LossLog | null = won
+      ? null
+      : {
+          id: rec.id,
+          time: rec.time,
+          symbol: rec.symbol,
+          direction,
+          entryDigit: -1,
+          exitDigit: null,
+          stake,
+          payout: soldFor,
+          loss: Math.abs(profit),
+          virtual: rec.virtual,
+          contractId: rec.contractId,
+          cause: s.accumulator.sellRequested ? "normal-variance" : "execution-risk",
+          reason: s.accumulator.sellRequested
+            ? "The accumulator was sold or settled after the target decision could not preserve the position."
+            : "The accumulator terminated before the configured cash-out target was reached.",
+          signalEpoch: null,
+          settledEpoch: c.exit_tick_time ? Number(c.exit_tick_time) : null,
+          analysis: accumulatorMarket?.analysis ?? emptyA,
+          confirmation: accumulatorMarket?.confirm ?? emptyA,
+          pWin: 0,
+          expectedValue: 0,
+          latencyMs: s.latencyMs,
+          tickAgeMs: accumulatorMarket?.lastTickAt
+            ? Date.now() - accumulatorMarket.lastTickAt
+            : null,
+          proposalAgeMs: meta?.startedAt ? Date.now() - meta.startedAt : null,
+          entryChecks: meta?.entryChecks ?? [],
+          proposalChecks: s.proposalChecks,
+          consecutiveLosses: s.consecLosses + 1,
+          dailyPnl: day.pnl,
+        };
+    this.send({ forget_all: "proposal_open_contract" });
+    this.set({
+      trades: [rec, ...s.trades],
+      lossLogs: lossLog ? [lossLog, ...s.lossLogs].slice(0, 300) : s.lossLogs,
+      cycle,
+      day,
+      learning: this.recordLearning(rec),
+      accumulator: {
+        ...s.accumulator,
+        currentValue: null,
+        peakValue: null,
+        soldFor,
+        sellRequested: false,
+        recoveryOutstanding,
+        totalRecovered: s.accumulator.totalRecovered + recovered,
+      },
+      phase: "none",
+      contractId: null,
+      contractMode: null,
+      currentDirection: null,
+      consecLosses: won ? 0 : s.consecLosses + 1,
+      lastSettledAt: Date.now(),
+    });
+    this.log(
+      "settle",
+      `ACCUMULATOR SETTLED — ${won ? "PROFIT" : "LOSS"} ${profit.toFixed(2)}; sale ${soldFor.toFixed(2)}; ${rec.exitReason}.`,
+    );
+    if (!won)
+      this.log(
+        "error",
+        `ACCUMULATOR LOSS — ${rec.id}: ${rec.exitReason}; recovery outstanding ${recoveryOutstanding.toFixed(2)}.`,
+      );
+    if (lossLog) this.log("error", `LOSS JOURNAL — ${lossLog.id}: ${lossLog.reason}`);
+    this.pendingAccumulatorMeta = null;
+    if (cycle && cycleComplete(cycle.start, cycle.profit)) this.completeCycle();
+    this.persist();
   }
 
   private onContract(c: any) {
     if (c.contract_id !== this.state.contractId) return;
+    if (this.state.contractMode === "accumulator") {
+      this.onAccumulatorContract(c);
+      return;
+    }
     if (c.tick_count !== undefined && Number(c.tick_count) !== CONTRACT_DURATION)
       this.log(
         "error",
@@ -1159,6 +1537,7 @@ class Engine {
       consecLosses: won ? 0 : s.consecLosses + 1,
       phase: "none",
       contractId: null,
+      contractMode: null,
       currentDirection: null,
       lastSettledAt: Date.now(),
     });

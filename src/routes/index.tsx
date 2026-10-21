@@ -157,8 +157,46 @@ function Dashboard() {
 
         <section className="space-y-4">
           <div className="panel p-4 grid grid-cols-2 gap-3">
-            <Stat l="Contract" v={s.currentDirection ? CONTRACTS[s.currentDirection].label : "–"} />
+            <Stat
+              l="Contract"
+              v={
+                s.contractMode === "accumulator"
+                  ? "ACCUMULATOR"
+                  : s.currentDirection
+                    ? CONTRACTS[s.currentDirection].label
+                    : "–"
+              }
+            />
             <Stat l="Trade status" v={s.phase.toUpperCase()} />
+            {s.config.tradeMode === "accumulator" && (
+              <>
+                <Stat
+                  l="Growth rate"
+                  v={
+                    s.accumulator.growthRate !== null
+                      ? `${(s.accumulator.growthRate * 100).toFixed(2)}%`
+                      : "–"
+                  }
+                />
+                <Stat
+                  l="Contract value"
+                  v={
+                    s.accumulator.currentValue !== null
+                      ? s.accumulator.currentValue.toFixed(2)
+                      : "–"
+                  }
+                />
+                <Stat
+                  l="Cash-out target"
+                  v={s.accumulator.target !== null ? s.accumulator.target.toFixed(2) : "–"}
+                />
+                <Stat
+                  l="Recovery"
+                  v={s.accumulator.recoveryOutstanding.toFixed(2)}
+                  tone={s.accumulator.recoveryOutstanding ? "down" : "up"}
+                />
+              </>
+            )}
             <Stat l="Total trades" v={s.trades.length} />
             <Stat
               l="Win rate"
@@ -276,7 +314,7 @@ function Controls({ s }: { s: State }) {
             <option value="auto-over-under">Auto OVER 2 / UNDER 7</option>
             <option value="over-only">OVER 2 only</option>
             <option value="under-only">UNDER 7 only</option>
-            <option value="accumulator">Accumulator (module validation)</option>
+            <option value="accumulator">Accumulator</option>
           </select>
         </Field>
         <Field l="Min bull/bear difference">
@@ -289,11 +327,19 @@ function Controls({ s }: { s: State }) {
             onBlur={num("minDifference")}
           />
         </Field>
+        {c.tradeMode !== "accumulator" && (
+          <Field l="Double confirmation">
+            <Switch
+              checked={c.doubleConfirmation}
+              onCheckedChange={(v) => engine.updateConfig({ doubleConfirmation: v })}
+            />
+          </Field>
+        )}
         {c.tradeMode === "accumulator" && (
           <div className="rounded border border-warning p-2 text-xs text-warning">
-            Accumulator settings are saved, but accumulator orders are blocked until the proposal
-            and cash-out lifecycle is fully validated. No OVER/UNDER order will be sent in this
-            mode.
+            Accumulator mode is active. The bot will only trade markets that advertise ACCU support,
+            validate the selected growth rate, and request a sale when the cash-out target is
+            reached.
           </div>
         )}
         <Field l="Fixed stake">
@@ -308,7 +354,9 @@ function Controls({ s }: { s: State }) {
         </Field>
         <Field l="Duration">
           <div className="text-sm text-primary">
-            {CONTRACT_DURATION} tick ({DURATION_UNIT}) · locked
+            {c.tradeMode === "accumulator"
+              ? "Until cash-out target or barrier breach"
+              : `${CONTRACT_DURATION} tick (${DURATION_UNIT}) · locked`}
           </div>
         </Field>
         <Field l="Max daily loss">

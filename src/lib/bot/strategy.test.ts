@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   analyze,
   backtest,
+  buildAccumulatorProposalRequest,
   buildProposalRequest,
   cycleComplete,
   cycleTarget,
@@ -14,6 +15,7 @@ import {
   rankMarkets,
   riskBlock,
   validateProposal,
+  validateAccumulatorProposal,
   type EntryContext,
 } from "./strategy";
 
@@ -116,6 +118,13 @@ describe("strict confirmation engine", () => {
       evaluateEntry(goodCtx({ confirmAnalysis: analyze(mixed(10, 50), 50, 30) })).direction,
     ).toBeNull();
   });
+  it("allows confirmation to be disabled explicitly", () => {
+    expect(
+      evaluateEntry(
+        goodCtx({ confirmAnalysis: analyze(mixed(10, 50), 50, 30), requireConfirmation: false }),
+      ).direction,
+    ).toBe("OVER2");
+  });
 });
 
 describe("bounded learning guard", () => {
@@ -178,6 +187,31 @@ describe("1-tick contract duration", () => {
         (c) => c.pass,
       ),
     ).toBe(false);
+  });
+});
+
+describe("accumulator proposal safety", () => {
+  it("builds an ACCU proposal with the fixed stake and growth rate", () => {
+    const request = buildAccumulatorProposalRequest("R_100", 1, "USD", 0.03);
+    expect(request.contract_type).toBe("ACCU");
+    expect(request.growth_rate).toBe(0.03);
+    expect(request.amount).toBe(1);
+  });
+  it("rejects an accumulator proposal with a mismatched growth rate", () => {
+    const checks = validateAccumulatorProposal(
+      {
+        echo_req: {
+          contract_type: "ACCU",
+          underlying_symbol: "R_100",
+          amount: 1,
+          basis: "stake",
+          growth_rate: 0.05,
+        },
+        proposal: { id: "a", ask_price: 1 },
+      },
+      { symbol: "R_100", stake: 1, growthRate: 0.03 },
+    );
+    expect(checks.find((check) => check.id === "a_growth")?.pass).toBe(false);
   });
 });
 

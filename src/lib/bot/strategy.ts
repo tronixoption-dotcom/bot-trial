@@ -131,6 +131,8 @@ export interface EntryContext {
   cooldownRemainingMs: number;
   realAccountBlocked: boolean;
   minDifference?: number;
+  checkEntryDigit?: boolean;
+  requireConfirmation?: boolean;
   /** A conservative, data-backed block produced by the learning layer. */
   learningBlock?: string | null;
 }
@@ -199,7 +201,7 @@ export function evaluateEntry(c: EntryContext): { checks: Check[]; direction: Di
     },
     {
       id: "diff",
-      label: `Bull/bear difference ≥ ${MIN_DIFFERENCE}`,
+      label: `Bull/bear difference ≥ ${c.minDifference ?? MIN_DIFFERENCE}`,
       pass:
         a.sufficient && a.difference >= (c.minDifference ?? MIN_DIFFERENCE) && a.trend !== "FLAT",
       detail: `${a.difference}`,
@@ -207,14 +209,22 @@ export function evaluateEntry(c: EntryContext): { checks: Check[]; direction: Di
     {
       id: "confirm",
       label: "Double-confirmed direction",
-      pass: !!dir && c.confirmAnalysis.direction === dir,
-      detail: c.confirmAnalysis.direction ?? "No confirmation",
+      pass: c.requireConfirmation === false || (!!dir && c.confirmAnalysis.direction === dir),
+      detail:
+        c.requireConfirmation === false
+          ? "Disabled by user"
+          : (c.confirmAnalysis.direction ?? "No confirmation"),
     },
     {
       id: "digit",
       label: "Entry digit matches direction",
-      pass: !!dir && c.latestDigit !== null && entryDigitOk(dir, c.latestDigit),
-      detail: digitDetail(dir, c.latestDigit),
+      pass:
+        c.checkEntryDigit === false ||
+        (!!dir && c.latestDigit !== null && entryDigitOk(dir, c.latestDigit)),
+      detail:
+        c.checkEntryDigit === false
+          ? "Not used for this strategy"
+          : digitDetail(dir, c.latestDigit),
     },
     {
       id: "stake",
@@ -390,6 +400,72 @@ export function buildProposalRequest(
     duration_unit: DURATION_UNIT,
     underlying_symbol: symbol,
   } as const;
+}
+
+export interface AccumulatorProposalLike {
+  echo_req?: Record<string, unknown>;
+  proposal?: { id?: string; ask_price?: number };
+  error?: { message: string };
+}
+
+export function buildAccumulatorProposalRequest(
+  symbol: string,
+  stake: number,
+  currency: string,
+  growthRate: number,
+) {
+  return {
+    proposal: 1,
+    amount: stake,
+    basis: "stake",
+    contract_type: "ACCU",
+    currency,
+    growth_rate: growthRate,
+    underlying_symbol: symbol,
+  } as const;
+}
+
+export function validateAccumulatorProposal(
+  res: AccumulatorProposalLike,
+  expected: { symbol: string; stake: number; growthRate: number },
+): Check[] {
+  const e = res.echo_req ?? {};
+  const p = res.proposal;
+  return [
+    {
+      id: "a_ok",
+      label: "Accumulator proposal returned without error",
+      pass: !res.error && !!p?.id,
+      detail: res.error?.message ?? "OK",
+    },
+    {
+      id: "a_type",
+      label: "Accumulator contract type correct",
+      pass: String(e.contract_type).toUpperCase() === "ACCU",
+      detail: String(e.contract_type),
+    },
+    {
+      id: "a_symbol",
+      label: "Accumulator symbol correct",
+      pass: (e.underlying_symbol ?? e.symbol) === expected.symbol,
+      detail: String(e.underlying_symbol ?? e.symbol),
+    },
+    {
+      id: "a_stake",
+      label: "Accumulator stake matches fixed stake",
+      pass:
+        Number(e.amount) === expected.stake &&
+        e.basis === "stake" &&
+        Number(p?.ask_price) === expected.stake,
+      detail: `${e.amount} / ask ${p?.ask_price}`,
+    },
+    {
+      id: "a_growth",
+      label: "Growth rate matches selected rate",
+      pass: Number(e.growth_rate) === expected.growthRate,
+      detail: String(e.growth_rate),
+    },
+  ];
 }
 
 // ---- Risk & cycles ----

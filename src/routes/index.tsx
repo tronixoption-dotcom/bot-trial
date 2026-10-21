@@ -264,6 +264,38 @@ function Controls({ s }: { s: State }) {
 
       <div className="panel p-4 space-y-2">
         <h3 className="label-xs">Strategy & risk</h3>
+        <Field l="Trading strategy">
+          <select
+            className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+            value={c.tradeMode}
+            disabled={busy || s.status === "running"}
+            onChange={(e) =>
+              engine.updateConfig({ tradeMode: e.target.value as typeof c.tradeMode })
+            }
+          >
+            <option value="auto-over-under">Auto OVER 2 / UNDER 7</option>
+            <option value="over-only">OVER 2 only</option>
+            <option value="under-only">UNDER 7 only</option>
+            <option value="accumulator">Accumulator (module validation)</option>
+          </select>
+        </Field>
+        <Field l="Min bull/bear difference">
+          <Input
+            type="number"
+            step="0.5"
+            min="0"
+            max="100"
+            defaultValue={c.minDifference}
+            onBlur={num("minDifference")}
+          />
+        </Field>
+        {c.tradeMode === "accumulator" && (
+          <div className="rounded border border-warning p-2 text-xs text-warning">
+            Accumulator settings are saved, but accumulator orders are blocked until the proposal
+            and cash-out lifecycle is fully validated. No OVER/UNDER order will be sent in this
+            mode.
+          </div>
+        )}
         <Field l="Fixed stake">
           <Input
             type="number"
@@ -300,6 +332,40 @@ function Controls({ s }: { s: State }) {
         <Field l="Min EV">
           <Input type="number" step="0.01" defaultValue={c.minEV} onBlur={num("minEV")} />
         </Field>
+        {c.tradeMode === "accumulator" && (
+          <>
+            <Field l="Accumulator growth">
+              <Input
+                type="number"
+                step="0.01"
+                min="0.01"
+                defaultValue={c.accumulatorGrowthRate}
+                onBlur={num("accumulatorGrowthRate")}
+              />
+            </Field>
+            <Field l="Cash-out multiplier">
+              <Input
+                type="number"
+                step="0.25"
+                min="1.25"
+                defaultValue={c.accumulatorCashOutMultiplier}
+                onBlur={num("accumulatorCashOutMultiplier")}
+              />
+            </Field>
+            <Field l="Auto growth selection">
+              <Switch
+                checked={c.accumulatorAutoGrowth}
+                onCheckedChange={(v) => engine.updateConfig({ accumulatorAutoGrowth: v })}
+              />
+            </Field>
+            <Field l="Recovery ledger">
+              <Switch
+                checked={c.accumulatorRecoveryMode}
+                onCheckedChange={(v) => engine.updateConfig({ accumulatorRecoveryMode: v })}
+              />
+            </Field>
+          </>
+        )}
         <Field l="Max tick age ms">
           <Input type="number" defaultValue={c.maxTickAgeMs} onBlur={num("maxTickAgeMs")} />
         </Field>

@@ -12,7 +12,7 @@
 // ---- LOCKED CONTRACT PARAMETERS (never configurable) ----
 export const CONTRACT_DURATION = 1 as const;
 export const DURATION_UNIT = "t" as const;
-export const MIN_DIFFERENCE = 5 as const;
+export const MIN_DIFFERENCE = 5;
 
 export type Direction = "OVER2" | "UNDER7";
 
@@ -41,7 +41,12 @@ export interface Analysis {
   direction: Direction | null;
 }
 
-export function analyze(quotes: number[], sampleSize: number, minSample: number): Analysis {
+export function analyze(
+  quotes: number[],
+  sampleSize: number,
+  minSample: number,
+  minDifference = MIN_DIFFERENCE,
+): Analysis {
   const sample = quotes.slice(-(sampleSize + 1));
   const moves = sample.length - 1;
   if (moves < minSample || moves < 1) {
@@ -66,7 +71,7 @@ export function analyze(quotes: number[], sampleSize: number, minSample: number)
   const bearish = round2((down / moves) * 100);
   const difference = round2(Math.abs(bullish - bearish));
   const trend = bullish > bearish ? "BULLISH" : bearish > bullish ? "BEARISH" : "FLAT";
-  const qualifies = trend !== "FLAT" && difference >= MIN_DIFFERENCE;
+  const qualifies = trend !== "FLAT" && difference >= minDifference;
   return {
     sufficient: true,
     moves,
@@ -125,6 +130,7 @@ export interface EntryContext {
   riskBlock: string | null;
   cooldownRemainingMs: number;
   realAccountBlocked: boolean;
+  minDifference?: number;
   /** A conservative, data-backed block produced by the learning layer. */
   learningBlock?: string | null;
 }
@@ -194,7 +200,8 @@ export function evaluateEntry(c: EntryContext): { checks: Check[]; direction: Di
     {
       id: "diff",
       label: `Bull/bear difference ≥ ${MIN_DIFFERENCE}`,
-      pass: a.sufficient && a.difference >= MIN_DIFFERENCE && a.trend !== "FLAT",
+      pass:
+        a.sufficient && a.difference >= (c.minDifference ?? MIN_DIFFERENCE) && a.trend !== "FLAT",
       detail: `${a.difference}`,
     },
     {
@@ -444,6 +451,7 @@ export function backtest(
   cfg: {
     sampleSize: number;
     minSample: number;
+    minDifference?: number;
     stake: number;
     payoutOver2: number;
     payoutUnder7: number;
@@ -454,8 +462,8 @@ export function backtest(
   const digits = quotes.map((q) => lastDigit(q, pipSize));
   for (let i = cfg.sampleSize + 1; i < quotes.length - 1; i++) {
     const win = quotes.slice(0, i + 1);
-    const a = analyze(win, cfg.sampleSize, cfg.minSample);
-    const conf = analyze(win.slice(0, -1), cfg.sampleSize, cfg.minSample);
+    const a = analyze(win, cfg.sampleSize, cfg.minSample, cfg.minDifference);
+    const conf = analyze(win.slice(0, -1), cfg.sampleSize, cfg.minSample, cfg.minDifference);
     if (!a.direction || conf.direction !== a.direction) continue;
     if (!entryDigitOk(a.direction, digits[i])) continue;
     const dist = digitDistribution(digits.slice(Math.max(0, i - cfg.sampleSize), i + 1));

@@ -39,9 +39,12 @@ export const VOL_SYMBOLS = [
 ];
 const LS = "deriv-ou-bot-v1";
 const DEMO_TRADES_REQUIRED = 20;
+export type TradeMode = "auto-over-under" | "over-only" | "under-only" | "accumulator";
 
 export interface Config {
   appId: string;
+  tradeMode: TradeMode;
+  minDifference: number;
   stake: number;
   maxDailyLoss: number;
   maxDrawdown: number;
@@ -55,6 +58,10 @@ export interface Config {
   maxTickAgeMs: number;
   maxLatencyMs: number;
   minEV: number;
+  accumulatorGrowthRate: number;
+  accumulatorCashOutMultiplier: number;
+  accumulatorAutoGrowth: boolean;
+  accumulatorRecoveryMode: boolean;
 }
 export interface Market {
   symbol: string;
@@ -199,6 +206,8 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 export const defaultConfig: Config = {
   appId: "",
+  tradeMode: "auto-over-under",
+  minDifference: 5,
   stake: 1,
   maxDailyLoss: 10,
   maxDrawdown: 10,
@@ -212,6 +221,10 @@ export const defaultConfig: Config = {
   maxTickAgeMs: 4000,
   maxLatencyMs: 1500,
   minEV: 0,
+  accumulatorGrowthRate: 0.03,
+  accumulatorCashOutMultiplier: 2,
+  accumulatorAutoGrowth: true,
+  accumulatorRecoveryMode: false,
 };
 
 class Engine {
@@ -326,7 +339,31 @@ class Engine {
       this.log("error", "Stake must be at least 0.35.");
       delete p.stake;
     }
-    this.set({ config: { ...this.state.config, ...p } });
+    if (
+      p.minDifference !== undefined &&
+      (!Number.isFinite(p.minDifference) || p.minDifference < 0 || p.minDifference > 100)
+    ) {
+      this.log("error", "Bull/bear difference must be between 0 and 100.");
+      delete p.minDifference;
+    }
+    if (
+      p.accumulatorCashOutMultiplier !== undefined &&
+      (!Number.isFinite(p.accumulatorCashOutMultiplier) || p.accumulatorCashOutMultiplier < 1.25)
+    ) {
+      this.log("error", "Accumulator cash-out multiplier must be at least 1.25.");
+      delete p.accumulatorCashOutMultiplier;
+    }
+    const config = { ...this.state.config, ...p };
+    this.set({ config });
+    if (p.minDifference !== undefined) {
+      const markets = Object.fromEntries(
+        Object.entries(this.state.markets).map(([symbol, market]) => [
+          symbol,
+          this.recompute(market),
+        ]),
+      );
+      this.set({ markets });
+    }
     this.persist();
   }
   demoTradesSettled() {
@@ -616,8 +653,13 @@ class Engine {
     const { sampleSize, minSample } = this.state.config;
     return {
       ...m,
-      analysis: analyze(m.quotes, sampleSize, minSample),
-      confirm: analyze(m.quotes.slice(0, -1), sampleSize, minSample),
+      analysis: analyze(m.quotes, sampleSize, minSample, this.state.config.minDifference),
+      confirm: analyze(
+        m.quotes.slice(0, -1),
+        sampleSize,
+        minSample,
+        this.state.config.minDifference,
+      ),
     };
   }
 
@@ -741,6 +783,16 @@ class Engine {
       : "Cycle not started";
     if (!rb && s.status !== "running") rb = `Bot is ${s.status}`;
     const stake = nextStake(c.stake, s.trades);
+    const rawAnalysis = m?.analysis ?? emptyA;
+    const rawConfirm = m?.confirm ?? emptyA;
+    const modeAnalysis = (analysis: Analysis): Analysis => {
+      if (c.tradeMode === "accumulator") return emptyA;
+      if (c.tradeMode === "over-only" && analysis.direction !== "OVER2")
+        return { ...analysis, qualifies: false, direction: null };
+      if (c.tradeMode === "under-only" && analysis.direction !== "UNDER7")
+        return { ...analysis, qualifies: false, direction: null };
+      return analysis;
+    };
     return evaluateEntry({
       connected: s.connected,
       authorized: s.authorized,
@@ -749,8 +801,8 @@ class Engine {
       tickAgeMs: m?.lastTickAt ? now - m.lastTickAt : null,
       maxTickAgeMs: c.maxTickAgeMs,
       symbolSupported: !!m,
-      analysis: m?.analysis ?? emptyA,
-      confirmAnalysis: m?.confirm ?? emptyA,
+      analysis: modeAnalysis(rawAnalysis),
+      confirmAnalysis: modeAnalysis(rawConfirm),
       latestDigit: m && m.quotes.length ? lastDigit(m.quotes[m.quotes.length - 1], m.pip) : null,
       stake,
       fixedStake: c.stake,
@@ -759,6 +811,7 @@ class Engine {
       riskBlock: rb,
       cooldownRemainingMs: s.lastSettledAt + c.cooldownSec * 1000 - now,
       realAccountBlocked: !!s.account && !s.account.isVirtual && !s.realEnabled,
+      minDifference: c.minDifference,
       learningBlock: this.learnedBlock(
         sym,
         m?.analysis.direction ?? null,
@@ -770,6 +823,16 @@ class Engine {
   private evaluate() {
     const s = this.state;
     if (s.status !== "running") {
+      this.set({ checks: this.context(s.active).checks });
+      return;
+    }
+    if (s.config.tradeMode === "accumulator") {
+      const msg =
+        "ACCUMULATOR selected — no purchase made while the accumulator module is being validated.";
+      if (msg !== this.lastReject) {
+        this.lastReject = msg;
+        this.log("reject", msg);
+      }
       this.set({ checks: this.context(s.active).checks });
       return;
     }
@@ -1211,6 +1274,7 @@ class Engine {
     const r = backtest(m.quotes, m.pip, {
       sampleSize: c.sampleSize,
       minSample: c.minSample,
+      minDifference: c.minDifference,
       stake: c.stake,
       payoutOver2: c.stake * 1.33,
       payoutUnder7: c.stake * 1.33,

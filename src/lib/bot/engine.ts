@@ -1031,7 +1031,7 @@ class Engine {
 
   private maybeSwitch() {
     const s = this.state;
-    if (s.phase !== "none") return;
+    if (s.phase !== "none" || s.ai.autonomous) return;
     if (!s.config.autoSwitch) {
       if (s.active !== s.config.manualSymbol) this.set({ active: s.config.manualSymbol });
       return;
@@ -1316,6 +1316,10 @@ class Engine {
           this.log("reject", `AUTONOMOUS AI — ${failed.label}: ${failed.detail}.`);
           return;
         }
+        this.log(
+          "info",
+          `AUTONOMOUS AI selected ${plan.symbol} (${plan.direction}) — ${plan.reason}.`,
+        );
         this.set({ active: plan.symbol });
         this.attempt(plan.symbol, direction, market.epochs.at(-1) ?? 0, true);
       })
@@ -1477,20 +1481,34 @@ class Engine {
     pChecks.push({
       id: "p_same_tick",
       label: "Signal tick still latest",
-      pass: s.config.fastEntry || cur?.epochs[cur.epochs.length - 1] === signalEpoch,
-      detail: s.config.fastEntry ? "Skipped in fast-entry mode" : "No newer tick",
+      pass:
+        aiAlreadyApproved ||
+        s.config.fastEntry ||
+        cur?.epochs[cur.epochs.length - 1] === signalEpoch,
+      detail: aiAlreadyApproved
+        ? "AI plan remains authoritative"
+        : s.config.fastEntry
+          ? "Skipped in fast-entry mode"
+          : "No newer tick",
     });
+    const safetyChecks = again.checks.filter((check) =>
+      ["conn", "auth", "latency", "fresh", "symbol", "stake", "funds", "risk"].includes(check.id),
+    );
     pChecks.push({
       id: "p_revalidate",
       label: "All entry checks and direction re-pass",
       pass:
-        s.config.fastEntry ||
-        (again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy")),
-      detail: s.config.fastEntry
-        ? "Skipped in quick-execute mode"
-        : again.direction !== direction
-          ? "Signal direction changed"
-          : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
+        aiAlreadyApproved || s.config.fastEntry
+          ? safetyChecks.every((check) => check.pass)
+          : again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy"),
+      detail: aiAlreadyApproved
+        ? (safetyChecks.find((check) => !check.pass)?.detail ??
+          "AI strategy selected; safety checks passed")
+        : s.config.fastEntry
+          ? "Skipped in quick-execute mode"
+          : again.direction !== direction
+            ? "Signal direction changed"
+            : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
     });
     pChecks.push({
       id: "p_market",

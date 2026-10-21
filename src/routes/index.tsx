@@ -355,20 +355,12 @@ function Controls({ s }: { s: State }) {
                 onCheckedChange={(v) => engine.updateConfig({ fastEntry: v })}
               />
             </Field>
-            {c.fastEntry && (
-              <div className="rounded border border-warning p-2 text-xs text-warning">
-                Quick execute buys immediately after the entry signal is accepted. It skips only
-                duplicate signal, EV, and cooldown re-checks; contract, proposal, balance, risk,
-                one-active-trade, and purchase safety checks remain active. Use this on demo first.
-              </div>
-            )}
           </>
         )}
         {c.tradeMode === "accumulator" && (
-          <div className="rounded border border-warning p-2 text-xs text-warning">
-            Accumulator mode is active. The bot will only trade markets that advertise ACCU support,
-            validate the selected growth rate, and request a sale when the cash-out target is
-            reached.
+          <div className="text-xs text-muted-foreground">
+            Accumulator growth: 1%–5%. The selected growth rate is proposed, bought, monitored, and
+            sold automatically at the configured cash-out target.
           </div>
         )}
         <Field l="Fixed stake">

@@ -409,6 +409,15 @@ class Engine {
       this.log("error", "Accumulator cash-out multiplier must be at least 1.25.");
       delete p.accumulatorCashOutMultiplier;
     }
+    if (
+      p.accumulatorGrowthRate !== undefined &&
+      (!Number.isFinite(p.accumulatorGrowthRate) ||
+        p.accumulatorGrowthRate < 0.01 ||
+        p.accumulatorGrowthRate > 0.05)
+    ) {
+      this.log("error", "Accumulator growth must be between 1% and 5%.");
+      delete p.accumulatorGrowthRate;
+    }
     const config = { ...this.state.config, ...p };
     this.set({ config });
     if (p.minDifference !== undefined) {
@@ -1030,8 +1039,15 @@ class Engine {
   private selectAccumulatorGrowthRate(m: Market) {
     const configured = this.state.config.accumulatorGrowthRate;
     if (!this.state.config.accumulatorAutoGrowth)
-      return m.accumulatorGrowthRates.includes(configured) ? configured : null;
-    return m.accumulatorGrowthRates.length ? Math.min(...m.accumulatorGrowthRates) : null;
+      return m.accumulatorSupported && configured >= 0.01 && configured <= 0.05 ? configured : null;
+    // Some contracts_for responses advertise ACCU but omit the rate list.
+    // The proposal endpoint still accepts the documented 1%–5% rates, so use
+    // the configured rate and let the proposal response remain authoritative.
+    return m.accumulatorGrowthRates.length
+      ? Math.min(...m.accumulatorGrowthRates)
+      : m.accumulatorSupported && configured >= 0.01 && configured <= 0.05
+        ? configured
+        : null;
   }
 
   private async attemptAccumulator(sym: string, signal: Direction) {
@@ -1142,11 +1158,15 @@ class Engine {
     pChecks.push({
       id: "p_revalidate",
       label: "All entry checks and direction re-pass",
-      pass: again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy"),
+      pass:
+        s.config.fastEntry ||
+        (again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy")),
       detail:
-        again.direction !== direction
-          ? "Signal direction changed"
-          : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
+        s.config.fastEntry
+          ? "Skipped in quick-execute mode"
+          : again.direction !== direction
+            ? "Signal direction changed"
+            : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
     });
     pChecks.push({
       id: "p_market",

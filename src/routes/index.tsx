@@ -363,7 +363,7 @@ function Controls({ s }: { s: State }) {
             sold automatically at the configured cash-out target.
           </div>
         )}
-        <Field l="Fixed stake">
+        <Field l="Base fixed stake">
           <Input
             type="number"
             step="0.01"
@@ -371,6 +371,12 @@ function Controls({ s }: { s: State }) {
             defaultValue={c.stake}
             disabled={busy || s.status === "running"}
             onBlur={num("stake")}
+          />
+        </Field>
+        <Field l="Double stake after loss">
+          <Switch
+            checked={c.doubleAfterLoss}
+            onCheckedChange={(v) => engine.updateConfig({ doubleAfterLoss: v })}
           />
         </Field>
         <Field l="Duration">

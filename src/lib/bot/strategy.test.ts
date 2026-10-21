@@ -125,6 +125,10 @@ describe("strict confirmation engine", () => {
       ).direction,
     ).toBe("OVER2");
   });
+  it("accepts a doubled stake only when double-after-loss is enabled", () => {
+    expect(evaluateEntry(goodCtx({ stake: 2, doubleAfterLoss: true })).direction).toBe("OVER2");
+    expect(evaluateEntry(goodCtx({ stake: 2 })).direction).toBeNull();
+  });
 });
 
 describe("bounded learning guard", () => {
@@ -218,6 +222,12 @@ describe("accumulator proposal safety", () => {
 describe("fixed stake, risk and cycles", () => {
   it("stake stays fixed after consecutive losses", () => {
     expect(nextStake(1, Array(10).fill({ profit: -1 }))).toBe(1);
+  });
+  it("uses twice the base stake after losses without compounding", () => {
+    expect(nextStake(1, [{ profit: -1 }], true)).toBe(2);
+    expect(nextStake(1, Array(3).fill({ profit: -1 }), true)).toBe(2);
+    expect(nextStake(1, [{ profit: 0.33 }], true)).toBe(1);
+    expect(nextStake(1, [], true)).toBe(1);
   });
   it("risk limits", () => {
     const cfg = { maxDailyLoss: 10, maxDrawdown: 8, maxConsecLosses: 3 };

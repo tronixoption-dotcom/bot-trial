@@ -49,6 +49,7 @@ export interface Config {
   minDifference: number;
   doubleConfirmation: boolean;
   fastEntry: boolean;
+  doubleAfterLoss: boolean;
   stake: number;
   maxDailyLoss: number;
   maxDrawdown: number;
@@ -174,6 +175,7 @@ export interface State {
   selectedAccount: string | null;
   markets: Record<string, Market>;
   active: string;
+  marketSwitchPendingLoss: boolean;
   phase: Phase;
   currentDirection: Direction | null;
   contractId: number | null;
@@ -231,6 +233,7 @@ export const defaultConfig: Config = {
   minDifference: 5,
   doubleConfirmation: true,
   fastEntry: false,
+  doubleAfterLoss: false,
   stake: 1,
   maxDailyLoss: 10,
   maxDrawdown: 10,
@@ -262,6 +265,7 @@ class Engine {
     selectedAccount: null,
     markets: {},
     active: "R_100",
+    marketSwitchPendingLoss: false,
     phase: "none",
     currentDirection: null,
     contractId: null,
@@ -315,6 +319,7 @@ class Engine {
   private persist() {
     const {
       config,
+      marketSwitchPendingLoss,
       trades,
       cycles,
       lossLogs,
@@ -330,6 +335,7 @@ class Engine {
         LS,
         JSON.stringify({
           config,
+          marketSwitchPendingLoss,
           trades,
           cycles,
           lossLogs: lossLogs.slice(0, 300),
@@ -363,6 +369,7 @@ class Engine {
         this.set({
           ...s,
           config,
+          marketSwitchPendingLoss: !!s.marketSwitchPendingLoss,
           lossLogs: Array.isArray(s.lossLogs) ? s.lossLogs : [],
           accumulator: { ...this.state.accumulator, ...(s.accumulator ?? {}) },
           learning: s.learning?.patterns
@@ -571,6 +578,7 @@ class Engine {
       contractId: null,
       contractMode: null,
       currentDirection: null,
+      marketSwitchPendingLoss: false,
       phase: "none",
       haltReason: null,
     });
@@ -898,15 +906,18 @@ class Engine {
     );
     const best = ranked[0];
     const currentRanked = ranked.find((m) => m.symbol === s.active);
+    const candidate = s.marketSwitchPendingLoss ? ranked.find((m) => m.symbol !== s.active) : best;
     if (
-      best &&
-      best.symbol !== s.active &&
-      (!currentRanked || best.analysis.difference > currentRanked.analysis.difference)
+      candidate &&
+      candidate.symbol !== s.active &&
+      (!currentRanked ||
+        s.marketSwitchPendingLoss ||
+        candidate.analysis.difference > currentRanked.analysis.difference)
     ) {
-      this.set({ active: best.symbol });
+      this.set({ active: candidate.symbol, marketSwitchPendingLoss: false });
       this.log(
         "switch",
-        `MARKET SWITCHED — ${s.markets[s.active]?.name ?? s.active}: ${s.markets[s.active]?.reject ?? "unavailable"}. Now ${best.name} (${CONTRACTS[best.analysis.direction ?? "OVER2"].label}, difference ${best.analysis.difference}).`,
+        `MARKET SWITCHED — ${s.markets[s.active]?.name ?? s.active}: ${s.markets[s.active]?.reject ?? "unavailable"}. Now ${candidate.name} (${CONTRACTS[candidate.analysis.direction ?? "OVER2"].label}, difference ${candidate.analysis.difference}).`,
       );
       this.lastReject = "";
     }
@@ -925,7 +936,7 @@ class Engine {
         )
       : "Cycle not started";
     if (!rb && s.status !== "running") rb = `Bot is ${s.status}`;
-    const stake = nextStake(c.stake, s.trades);
+    const stake = nextStake(c.stake, s.trades, c.doubleAfterLoss);
     const rawAnalysis = m?.analysis ?? emptyA;
     const rawConfirm = m?.confirm ?? emptyA;
     const modeAnalysis = (analysis: Analysis): Analysis => {
@@ -948,6 +959,7 @@ class Engine {
       latestDigit: m && m.quotes.length ? lastDigit(m.quotes[m.quotes.length - 1], m.pip) : null,
       stake,
       fixedStake: c.stake,
+      doubleAfterLoss: c.doubleAfterLoss,
       balance: s.account?.balance ?? null,
       busy: s.phase !== "none",
       riskBlock: rb,
@@ -1063,7 +1075,7 @@ class Engine {
       }
       return;
     }
-    const stake = s.config.stake;
+    const stake = nextStake(s.config.stake, s.trades, s.config.doubleAfterLoss);
     const entryChecks = this.context(sym).checks;
     this.set({
       phase: "proposing",
@@ -1123,7 +1135,7 @@ class Engine {
     // EV filter uses actual payout from proposal + historical digit distribution
     const digits = m.quotes.slice(-s.config.sampleSize).map((q) => lastDigit(q, m.pip));
     const dist = digitDistribution(digits);
-    const stake = s.config.stake;
+    const stake = nextStake(s.config.stake, s.trades, s.config.doubleAfterLoss);
     this.set({
       phase: "proposing",
       currentDirection: direction,
@@ -1161,12 +1173,11 @@ class Engine {
       pass:
         s.config.fastEntry ||
         (again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy")),
-      detail:
-        s.config.fastEntry
-          ? "Skipped in quick-execute mode"
-          : again.direction !== direction
-            ? "Signal direction changed"
-            : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
+      detail: s.config.fastEntry
+        ? "Skipped in quick-execute mode"
+        : again.direction !== direction
+          ? "Signal direction changed"
+          : (again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK"),
     });
     pChecks.push({
       id: "p_market",
@@ -1547,6 +1558,7 @@ class Engine {
       contractId: null,
       contractMode: null,
       currentDirection: null,
+      marketSwitchPendingLoss: !won,
       consecLosses: won ? 0 : s.consecLosses + 1,
       lastSettledAt: Date.now(),
     });
@@ -1625,6 +1637,7 @@ class Engine {
       contractId: null,
       contractMode: null,
       currentDirection: null,
+      marketSwitchPendingLoss: !won,
       lastSettledAt: Date.now(),
     });
     this.log(

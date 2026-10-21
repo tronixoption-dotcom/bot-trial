@@ -22,9 +22,9 @@ Mandatory requirements:
 
 If the API returns a proposal with any duration other than 1 tick, the bot must reject it immediately.
 
-FINAL NON-NEGOTIABLE RULE:
+Stake is fixed at the configured base amount by default. If "Double stake after loss" is explicitly enabled, the next trade after a loss uses twice the base stake; this does not compound after consecutive losses. The selected stake must be covered by the account balance and validated before purchase.
 
-Every trade must use a fixed stake, a duration of exactly 1 tick, and must satisfy ALL entry conditions before execution. No exceptions.
+Every trade must use a duration of exactly 1 tick and satisfy the configured entry conditions before execution.
 
 This project was built with [Lovable](https://lovable.dev).
 

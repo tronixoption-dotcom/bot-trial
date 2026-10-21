@@ -125,6 +125,7 @@ export interface EntryContext {
   latestDigit: number | null;
   stake: number;
   fixedStake: number;
+  doubleAfterLoss?: boolean;
   balance: number | null;
   busy: boolean;
   riskBlock: string | null;
@@ -228,8 +229,11 @@ export function evaluateEntry(c: EntryContext): { checks: Check[]; direction: Di
     },
     {
       id: "stake",
-      label: "Stake equals fixed stake",
-      pass: c.stake === c.fixedStake && c.stake > 0,
+      label: "Stake matches selected entry stake",
+      pass:
+        c.stake > 0 &&
+        (c.stake === c.fixedStake ||
+          (c.doubleAfterLoss === true && c.stake === c.fixedStake * 2)),
       detail: `${c.stake}`,
     },
     {
@@ -490,9 +494,13 @@ export function riskBlock(s: RiskState, c: RiskConfig): string | null {
   return null;
 }
 
-/** Stake never changes with results. Returned value is always the user's fixed stake. */
-export function nextStake(fixedStake: number, _history: { profit: number }[]): number {
-  return fixedStake;
+/** Return the configured stake, optionally doubling only the entry after a loss. */
+export function nextStake(
+  fixedStake: number,
+  history: { profit: number }[],
+  doubleAfterLoss = false,
+): number {
+  return doubleAfterLoss && history[0]?.profit < 0 ? fixedStake * 2 : fixedStake;
 }
 
 export function cycleTarget(startBalance: number) {

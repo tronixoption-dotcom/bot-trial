@@ -244,6 +244,9 @@ function Controls({ s }: { s: State }) {
   const [groqModel, setGroqModel] = useState(s.ai.model);
   const c = s.config;
   const busy = s.phase !== "none";
+  useEffect(() => {
+    if (s.ai.configured) setGroqModel(s.ai.model);
+  }, [s.ai.configured, s.ai.model]);
   const num = (k: keyof typeof c) => (e: React.ChangeEvent<HTMLInputElement>) =>
     engine.updateConfig({ [k]: Number(e.target.value) } as never);
   return (
@@ -310,19 +313,20 @@ function Controls({ s }: { s: State }) {
           placeholder="Groq API key"
           value={groqKey}
           onChange={(e) => setGroqKey(e.target.value)}
+          onBlur={() => void engine.discoverGroqModels(groqKey)}
         />
         <select
           className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
-          value={GROQ_MODEL_PRESETS.some((model) => model.id === groqModel) ? groqModel : "custom"}
+          value={s.ai.models.includes(groqModel) ? groqModel : "custom"}
           onChange={(e) => {
             const next = e.target.value === "custom" ? groqModel : e.target.value;
             setGroqModel(next);
             if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
           }}
         >
-          {GROQ_MODEL_PRESETS.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.label}
+          {s.ai.models.map((model) => (
+            <option key={model} value={model}>
+              {model}
             </option>
           ))}
           <option value="custom">Custom model ID</option>

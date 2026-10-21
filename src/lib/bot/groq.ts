@@ -39,40 +39,120 @@ export interface GroqAutonomousInput {
 }
 
 const ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const MODELS_ENDPOINT = "https://api.groq.com/openai/v1/models";
+export const DEFAULT_GROQ_MODELS = [
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
+  "qwen/qwen3.8-27b",
+];
+const strictModels = new Set(["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]);
+const signalSchema = {
+  type: "object",
+  properties: {
+    direction: { type: "string", enum: ["OVER2", "UNDER7", "NONE"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    reason: { type: "string" },
+  },
+  required: ["direction", "confidence", "reason"],
+  additionalProperties: false,
+};
+const planSchema = {
+  type: "object",
+  properties: {
+    symbol: { type: "string" },
+    direction: { type: "string", enum: ["OVER2", "UNDER7", "NONE"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    reason: { type: "string" },
+  },
+  required: ["symbol", "direction", "confidence", "reason"],
+  additionalProperties: false,
+};
+
+function responseFormat(model: string, name: string, schema: object) {
+  return strictModels.has(model)
+    ? { type: "json_schema", json_schema: { name, strict: true, schema } }
+    : { type: "json_object" };
+}
+
+function groqError(payload: any, status: number) {
+  const failure = payload?.error?.failed_generation;
+  const detail = typeof failure === "string" ? failure : failure?.reason;
+  return payload?.error?.message
+    ? `${payload.error.message}${detail ? ` (${detail})` : ""}`
+    : `Groq request failed (${status})`;
+}
+
+export async function listGroqModels(apiKey: string): Promise<string[]> {
+  const response = await fetch(MODELS_ENDPOINT, {
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(groqError(payload, response.status));
+  const available = Array.isArray(payload?.data)
+    ? payload.data
+        .filter((model: any) => model?.id && model?.active !== false)
+        .map((model: any) => String(model.id))
+    : [];
+  const ranking = new Map(DEFAULT_GROQ_MODELS.map((model, index) => [model, index]));
+  return [...new Set<string>(available as string[])].sort(
+    (a, b) =>
+      (ranking.get(a) ?? DEFAULT_GROQ_MODELS.length) -
+      (ranking.get(b) ?? DEFAULT_GROQ_MODELS.length),
+  );
+}
+
+async function completeGroq(
+  apiKey: string,
+  model: string,
+  messages: Array<{ role: "system" | "user"; content: string }>,
+  maxCompletionTokens: number,
+  format: object,
+) {
+  const send = (response_format?: object) =>
+    fetch(ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_completion_tokens: maxCompletionTokens,
+        ...(response_format ? { response_format } : {}),
+        messages,
+      }),
+    });
+  let response = await send(format);
+  let payload = await response.json().catch(() => null);
+  // Some account/model combinations reject JSON mode with failed_generation.
+  // Retry once as plain text; the parser still requires valid JSON before use.
+  if (!response.ok && payload?.error?.failed_generation) {
+    response = await send();
+    payload = await response.json().catch(() => null);
+  }
+  if (!response.ok) throw new Error(groqError(payload, response.status));
+  return payload;
+}
 
 export async function requestGroqSignal(
   apiKey: string,
   model: string,
   input: GroqSignalInput,
 ): Promise<GroqSignal> {
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      max_completion_tokens: 160,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'You are a conservative trading risk reviewer. Return JSON only: {"direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. You must choose NONE when the evidence is weak, conflicting, or does not support the proposed direction. Never invent data and never recommend increasing stake.',
-        },
-        {
-          role: "user",
-          content: JSON.stringify(input),
-        },
-      ],
-    }),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error?.message ?? `Groq request failed (${response.status})`);
-  }
+  const payload = await completeGroq(
+    apiKey,
+    model,
+    [
+      {
+        role: "system",
+        content:
+          'You are a conservative trading risk reviewer. Return JSON only: {"direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. You must choose NONE when the evidence is weak, conflicting, or does not support the proposed direction. Never invent data and never recommend increasing stake.',
+      },
+      { role: "user", content: JSON.stringify(input) },
+    ],
+    160,
+    responseFormat(model, "trading_signal", signalSchema),
+  );
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("Groq returned no decision");
   let parsed: unknown;
@@ -100,30 +180,20 @@ export async function requestGroqPlan(
   model: string,
   input: GroqAutonomousInput,
 ): Promise<{ symbol: string; direction: GroqDirection; confidence: number; reason: string }> {
-  const response = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      max_completion_tokens: 220,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'You are a conservative demo-only trading planner. Return JSON only: {"symbol":"exact supplied symbol","direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. Select only a fresh supplied market. Choose NONE when evidence is weak or conflicting. Do not increase stake, invent markets, or promise profit. This is a proposal, not permission to bypass platform safety checks.',
-        },
-        { role: "user", content: JSON.stringify(input) },
-      ],
-    }),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok)
-    throw new Error(payload?.error?.message ?? `Groq request failed (${response.status})`);
+  const payload = await completeGroq(
+    apiKey,
+    model,
+    [
+      {
+        role: "system",
+        content:
+          'You are a conservative demo-only trading planner. Return JSON only: {"symbol":"exact supplied symbol","direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. Select only a fresh supplied market. Choose NONE when evidence is weak or conflicting. Do not increase stake, invent markets, or promise profit. This is a proposal, not permission to bypass platform safety checks.',
+      },
+      { role: "user", content: JSON.stringify(input) },
+    ],
+    220,
+    responseFormat(model, "autonomous_trading_plan", planSchema),
+  );
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("Groq returned no plan");
   let parsed: unknown;

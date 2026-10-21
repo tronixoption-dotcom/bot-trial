@@ -26,7 +26,7 @@ import {
   type LearningPattern,
   validateAccumulatorProposal,
 } from "./strategy";
-import { requestGroqPlan, requestGroqSignal } from "./groq";
+import { DEFAULT_GROQ_MODELS, listGroqModels, requestGroqPlan, requestGroqSignal } from "./groq";
 
 export const VOL_SYMBOLS = [
   "R_10",
@@ -224,6 +224,7 @@ export interface State {
     autonomous: boolean;
     configured: boolean;
     model: string;
+    models: string[];
     busy: boolean;
     lastDecision: string | null;
     error: string | null;
@@ -320,6 +321,7 @@ class Engine {
       autonomous: false,
       configured: false,
       model: "llama-3.3-70b-versatile",
+      models: [...DEFAULT_GROQ_MODELS],
       busy: false,
       lastDecision: null,
       error: null,
@@ -337,6 +339,8 @@ class Engine {
   private inited = false;
   private groqApiKey = "";
   private lastAiPlanAt = 0;
+  private aiRetryAfter = 0;
+  private lastAiError = "";
 
   subscribe = (l: () => void) => {
     this.listeners.add(l);
@@ -553,6 +557,32 @@ class Engine {
     });
   }
 
+  async discoverGroqModels(apiKey: string) {
+    const key = apiKey.trim();
+    if (!key) return;
+    this.groqApiKey = key;
+    this.set({ ai: { ...this.state.ai, configured: false, busy: true, error: null } });
+    try {
+      const models = await listGroqModels(key);
+      if (!models.length) throw new Error("No active chat models are available for this key");
+      this.set({
+        ai: {
+          ...this.state.ai,
+          configured: true,
+          busy: false,
+          models,
+          model: models[0],
+          error: null,
+        },
+      });
+      this.log("info", `Groq key verified — selected best available model ${models[0]}.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not load Groq models";
+      this.set({ ai: { ...this.state.ai, configured: false, busy: false, error: detail } });
+      this.log("error", `Groq model discovery failed — ${detail}.`);
+    }
+  }
+
   setGroqAutonomous(autonomous: boolean) {
     if (autonomous && !this.state.ai.enabled) {
       this.log("error", "Enable and configure Groq before starting autonomous AI mode.");
@@ -569,6 +599,7 @@ class Engine {
         enabled: false,
         autonomous: false,
         configured: false,
+        models: [...DEFAULT_GROQ_MODELS],
         busy: false,
         error: null,
       },
@@ -1208,7 +1239,7 @@ class Engine {
       return;
     }
     if (!s.ai.enabled || !this.groqApiKey || s.phase !== "none" || s.ai.busy) return;
-    if (Date.now() - this.lastAiPlanAt < 2500) return;
+    if (Date.now() - this.lastAiPlanAt < 2500 || Date.now() < this.aiRetryAfter) return;
     const now = Date.now();
     const markets = Object.values(s.markets)
       .filter(
@@ -1242,6 +1273,8 @@ class Engine {
     })
       .then((plan) => {
         const current = this.state;
+        this.aiRetryAfter = 0;
+        this.lastAiError = "";
         const market = current.markets[plan.symbol];
         const direction: Direction | null = plan.direction === "NONE" ? null : plan.direction;
         const detail = `${plan.symbol} ${plan.direction}, confidence ${(plan.confidence * 100).toFixed(0)}%: ${plan.reason}`;
@@ -1288,8 +1321,12 @@ class Engine {
       })
       .catch((error) => {
         const detail = error instanceof Error ? error.message : "Groq plan failed";
+        this.aiRetryAfter = Date.now() + 10000;
         this.set({ ai: { ...this.state.ai, busy: false, error: detail } });
-        this.log("reject", `AUTONOMOUS AI — ${detail}.`);
+        if (detail !== this.lastAiError) {
+          this.lastAiError = detail;
+          this.log("reject", `AUTONOMOUS AI — ${detail}.`);
+        }
       });
   }
 

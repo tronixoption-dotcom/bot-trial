@@ -60,7 +60,12 @@ async function exchange(code) {
   const response = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code }),
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+      redirect_uri: `${publicUrl}/auth/callback`,
+    }),
   });
   const data = await response.json();
   if (!response.ok || !data.access_token)
@@ -139,6 +144,7 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (url.pathname === "/auth/callback") {
+      if (!url.searchParams.get("code")) return send(response, 400, { error: "GitHub did not return an OAuth code" });
       const stateExpiry = states.get(url.searchParams.get("state"));
       states.delete(url.searchParams.get("state"));
       if (!stateExpiry || stateExpiry < Date.now())

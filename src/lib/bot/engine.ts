@@ -29,6 +29,10 @@ import {
 import { DEFAULT_GROQ_MODELS, listGroqModels, requestGroqPlan, requestGroqSignal } from "./groq";
 import { copilotStatus, requestCopilotPlan } from "./copilot";
 
+const DEFAULT_COPILOT_BASE_URL =
+  (import.meta.env.VITE_COPILOT_BASE_URL as string | undefined)?.trim().replace(/\/$/, "") ||
+  "http://localhost:8787";
+
 export const VOL_SYMBOLS = [
   "R_10",
   "R_25",
@@ -324,7 +328,7 @@ class Engine {
       enabled: false,
       autonomous: false,
       provider: "groq",
-      copilotBaseUrl: "http://localhost:8787",
+      copilotBaseUrl: DEFAULT_COPILOT_BASE_URL,
       copilotConnected: false,
       configured: false,
       model: "llama-3.3-70b-versatile",
@@ -570,6 +574,9 @@ class Engine {
       return;
     }
     this.set({ ai: { ...this.state.ai, provider, autonomous: false, error: null } });
+    if (provider === "copilot" && !this.state.ai.copilotConnected) {
+      this.connectCopilot();
+    }
   }
 
   setAIEnabled(enabled: boolean) {
@@ -602,11 +609,13 @@ class Engine {
   async refreshCopilotStatus() {
     try {
       const result = await copilotStatus(this.state.ai.copilotBaseUrl);
+      const newlyConnected = result.connected && !this.state.ai.copilotConnected;
       this.set({
         ai: {
           ...this.state.ai,
           copilotConnected: result.connected,
           configured: result.connected,
+          enabled: newlyConnected ? true : this.state.ai.enabled,
           error: result.connected ? null : this.state.ai.error,
         },
       });

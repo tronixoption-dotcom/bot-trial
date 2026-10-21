@@ -332,7 +332,8 @@ function Controls({ s }: { s: State }) {
               {s.ai.copilotConnected ? "GitHub Copilot connected" : "Connect GitHub Copilot"}
             </Button>
             <p className="text-xs text-muted-foreground">
-              GitHub OAuth opens in a browser. The Copilot token stays in the Node service.
+              Selecting Copilot opens GitHub authorization automatically. After approval, Copilot
+              is enabled and ready to use.
             </p>
           </>
         )}
@@ -427,11 +428,11 @@ function Controls({ s }: { s: State }) {
         )}
         <div className="text-xs text-muted-foreground">
           {s.ai.busy
-            ? "Groq is reviewing the signal..."
+            ? `${s.ai.provider === "copilot" ? "Copilot" : "Groq"} is reviewing the signal...`
             : s.ai.error
               ? `AI rejected/error: ${s.ai.error}`
               : s.ai.enabled
-                ? `Enabled · ${s.ai.model}`
+                ? `Enabled · ${s.ai.provider === "copilot" ? "GitHub Copilot" : s.ai.model}`
                 : "Disabled"}
         </div>
         {s.ai.enabled && (

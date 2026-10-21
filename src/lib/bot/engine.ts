@@ -963,7 +963,7 @@ class Engine {
         )
       : "Cycle not started";
     if (!rb && s.status !== "running") rb = `Bot is ${s.status}`;
-    const stake = nextStake(c.stake, s.trades, c.doubleAfterLoss);
+    const stake = nextStake(c.stake, s.trades);
     const rawAnalysis = m?.analysis ?? emptyA;
     const rawConfirm = m?.confirm ?? emptyA;
     const modeAnalysis = (analysis: Analysis): Analysis => {
@@ -1122,7 +1122,7 @@ class Engine {
       }
       return;
     }
-    const stake = nextStake(s.config.stake, s.trades, s.config.doubleAfterLoss);
+    const stake = nextStake(s.config.stake, s.trades);
     const entryChecks = this.context(sym).checks;
     this.set({
       phase: "proposing",
@@ -1182,7 +1182,7 @@ class Engine {
     // EV filter uses actual payout from proposal + historical digit distribution
     const digits = m.quotes.slice(-s.config.sampleSize).map((q) => lastDigit(q, m.pip));
     const dist = digitDistribution(digits);
-    const stake = nextStake(s.config.stake, s.trades, s.config.doubleAfterLoss);
+    const stake = nextStake(s.config.stake, s.trades);
     this.set({
       phase: "proposing",
       currentDirection: direction,
@@ -1199,10 +1199,8 @@ class Engine {
     pChecks.push({
       id: "p_ev",
       label: `Expected value > ${s.config.minEV}`,
-      pass: s.config.fastEntry || ev > s.config.minEV,
-      detail: s.config.fastEntry
-        ? `Skipped in quick-execute mode (EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"})`
-        : `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
+      pass: ev > s.config.minEV,
+      detail: `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
     });
     // Revalidate everything right before purchase. Fast entry skips only the
     // duplicate signal checks; proposal and account safety checks remain active.
@@ -1359,8 +1357,8 @@ class Engine {
   }
 
   private createLossLog(c: any, rec: TradeRec, meta: ReturnType<Engine["getLossMeta"]>): LossLog {
-    const exitValue =
-      c.exit_tick_display_value === undefined ? null : String(c.exit_tick_display_value);
+    const rawExitValue = c.exit_tick_display_value ?? c.exit_tick ?? c.exit_spot ?? null;
+    const exitValue = rawExitValue === null ? null : String(rawExitValue);
     const exitDigit = exitValue === null ? null : Number(exitValue.slice(-1));
     const weak = meta.analysis.difference < 10 || meta.confirmation.difference < 10;
     const poorValue = meta.expectedValue <= 0;
@@ -1691,7 +1689,11 @@ class Engine {
     });
     this.log(
       "settle",
-      `SETTLED — ${CONTRACTS[direction].label} ${won ? "WON" : "LOST"} ${profit.toFixed(2)} (exit digit ${c.exit_tick_display_value ? String(c.exit_tick_display_value).slice(-1) : "?"}).`,
+      `SETTLED — ${CONTRACTS[direction].label} ${won ? "WON" : "LOST"} ${profit.toFixed(2)} (exit digit ${
+        (c.exit_tick_display_value ?? c.exit_tick ?? c.exit_spot) !== undefined
+          ? String(c.exit_tick_display_value ?? c.exit_tick ?? c.exit_spot).slice(-1)
+          : "?"
+      }).`,
     );
     if (lossLog)
       this.log("error", `LOSS JOURNAL — ${lossLog.id}: ${lossLog.cause}; ${lossLog.reason}`);

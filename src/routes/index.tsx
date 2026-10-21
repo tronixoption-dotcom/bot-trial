@@ -373,12 +373,6 @@ function Controls({ s }: { s: State }) {
             onBlur={num("stake")}
           />
         </Field>
-        <Field l="Double stake after loss">
-          <Switch
-            checked={c.doubleAfterLoss}
-            onCheckedChange={(v) => engine.updateConfig({ doubleAfterLoss: v })}
-          />
-        </Field>
         <Field l="Skip after consecutive wins">
           <Input
             type="number"

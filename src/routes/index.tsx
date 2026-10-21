@@ -241,6 +241,7 @@ function Controls({ s }: { s: State }) {
   const [token, setToken] = useState("");
   const [confirm, setConfirm] = useState("");
   const [groqKey, setGroqKey] = useState("");
+  const [openRouterKey, setOpenRouterKey] = useState("");
   const [groqModel, setGroqModel] = useState(s.ai.model);
   const [copilotUrl, setCopilotUrl] = useState(s.ai.copilotBaseUrl);
   const c = s.config;
@@ -315,9 +316,12 @@ function Controls({ s }: { s: State }) {
           className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
           value={s.ai.provider}
           disabled={s.status === "running"}
-          onChange={(e) => engine.setAIProvider(e.target.value as "groq" | "copilot")}
+          onChange={(e) =>
+            engine.setAIProvider(e.target.value as "groq" | "openrouter" | "copilot")
+          }
         >
           <option value="groq">Groq</option>
+          <option value="openrouter">OpenRouter</option>
           <option value="copilot">GitHub Copilot</option>
         </select>
         {s.ai.provider === "copilot" && (
@@ -342,6 +346,7 @@ function Controls({ s }: { s: State }) {
           The selected AI chooses plans, but cannot bypass EV, proposal, balance, risk, stake, or
           contract checks.
           {s.ai.provider === "groq" && " Groq keys are memory-only."}
+          {s.ai.provider === "openrouter" && " OpenRouter keys are memory-only."}
         </p>
         {s.ai.provider === "groq" && (
           <>
@@ -379,6 +384,42 @@ function Controls({ s }: { s: State }) {
             />
           </>
         )}
+        {s.ai.provider === "openrouter" && (
+          <>
+            <Input
+              type="password"
+              placeholder="OpenRouter API key"
+              value={openRouterKey}
+              onChange={(e) => setOpenRouterKey(e.target.value)}
+              onBlur={() => void engine.discoverOpenRouterModels(openRouterKey)}
+            />
+            <select
+              className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+              value={s.ai.models.includes(s.ai.model) ? s.ai.model : "custom"}
+              onChange={(e) => {
+                const next = e.target.value === "custom" ? s.ai.model : e.target.value;
+                engine.setAIModel(next);
+                if (s.ai.enabled) engine.configureOpenRouter(openRouterKey, next, true);
+              }}
+            >
+              {s.ai.models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+              <option value="custom">Custom model ID</option>
+            </select>
+            <Input
+              placeholder="Selected OpenRouter model ID"
+              value={s.ai.model}
+              onChange={(e) => {
+                const next = e.target.value;
+                engine.setAIModel(next);
+                if (s.ai.enabled) engine.configureOpenRouter(openRouterKey, next, true);
+              }}
+            />
+          </>
+        )}
         {s.ai.provider === "copilot" && (
           <select
             className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
@@ -397,12 +438,18 @@ function Controls({ s }: { s: State }) {
         <Switch
           checked={s.ai.enabled}
           disabled={
-            s.ai.provider === "groq" ? !groqKey && !s.ai.configured : !s.ai.copilotConnected
+            s.ai.provider === "groq"
+              ? !groqKey && !s.ai.configured
+              : s.ai.provider === "openrouter"
+                ? !openRouterKey && !s.ai.configured
+                : !s.ai.copilotConnected
           }
           onCheckedChange={(enabled) =>
             s.ai.provider === "groq"
               ? engine.configureGroq(groqKey, groqModel, enabled)
-              : engine.setAIEnabled(enabled)
+              : s.ai.provider === "openrouter"
+                ? engine.configureOpenRouter(openRouterKey, s.ai.model, enabled)
+                : engine.setAIEnabled(enabled)
           }
         />
         <Field l="Autonomous AI strategy (demo only)">
@@ -448,7 +495,7 @@ function Controls({ s }: { s: State }) {
         )}
         <div className="text-xs text-muted-foreground">
           {s.ai.busy
-            ? `${s.ai.provider === "copilot" ? "Copilot" : "Groq"} is reviewing the signal...`
+            ? `${s.ai.provider === "copilot" ? "Copilot" : s.ai.provider === "openrouter" ? "OpenRouter" : "Groq"} is reviewing the signal...`
             : s.ai.error
               ? `AI rejected/error: ${s.ai.error}`
               : s.ai.enabled
@@ -472,6 +519,18 @@ function Controls({ s }: { s: State }) {
             }}
           >
             Clear Groq key
+          </Button>
+        )}
+        {s.ai.provider === "openrouter" && s.ai.configured && (
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={() => {
+              setOpenRouterKey("");
+              engine.clearOpenRouter();
+            }}
+          >
+            Clear OpenRouter key
           </Button>
         )}
       </div>

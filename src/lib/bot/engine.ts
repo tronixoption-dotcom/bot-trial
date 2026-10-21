@@ -28,6 +28,12 @@ import {
 } from "./strategy";
 import { DEFAULT_GROQ_MODELS, listGroqModels, requestGroqPlan, requestGroqSignal } from "./groq";
 import { copilotModels, copilotStatus, requestCopilotPlan } from "./copilot";
+import {
+  DEFAULT_OPENROUTER_MODELS,
+  listOpenRouterModels,
+  requestOpenRouterPlan,
+  requestOpenRouterSignal,
+} from "./openrouter";
 
 const DEFAULT_COPILOT_BASE_URL =
   (import.meta.env.VITE_COPILOT_BASE_URL as string | undefined)?.trim().replace(/\/$/, "") ||
@@ -227,7 +233,7 @@ export interface State {
   ai: {
     enabled: boolean;
     autonomous: boolean;
-    provider: "groq" | "copilot";
+    provider: "groq" | "openrouter" | "copilot";
     copilotBaseUrl: string;
     copilotConnected: boolean;
     configured: boolean;
@@ -349,6 +355,7 @@ class Engine {
   private buySentAt = 0;
   private inited = false;
   private groqApiKey = "";
+  private openRouterApiKey = "";
   private lastAiPlanAt = 0;
   private aiRetryAfter = 0;
   private lastAiError = "";
@@ -568,7 +575,22 @@ class Engine {
     });
   }
 
-  setAIProvider(provider: "groq" | "copilot") {
+  configureOpenRouter(apiKey: string, model: string, enabled: boolean) {
+    this.openRouterApiKey = apiKey.trim();
+    const selectedModel = model.trim() || DEFAULT_OPENROUTER_MODELS[0];
+    this.set({
+      ai: {
+        ...this.state.ai,
+        enabled,
+        autonomous: enabled ? this.state.ai.autonomous : false,
+        configured: !!this.openRouterApiKey,
+        model: selectedModel,
+        error: null,
+      },
+    });
+  }
+
+  setAIProvider(provider: "groq" | "openrouter" | "copilot") {
     if (this.state.status === "running") {
       this.log("error", "Stop the bot before changing AI providers.");
       return;
@@ -578,9 +600,20 @@ class Engine {
         ...this.state.ai,
         provider,
         autonomous: false,
+        configured: false,
         error: null,
-        models: provider === "copilot" ? [] : this.state.ai.models,
-        model: provider === "copilot" ? "" : this.state.ai.model,
+        models:
+          provider === "copilot"
+            ? []
+            : provider === "openrouter"
+              ? [...DEFAULT_OPENROUTER_MODELS]
+              : [...DEFAULT_GROQ_MODELS],
+        model:
+          provider === "copilot"
+            ? ""
+            : provider === "openrouter"
+              ? DEFAULT_OPENROUTER_MODELS[0]
+              : DEFAULT_GROQ_MODELS[0],
       },
     });
     if (provider === "copilot" && !this.state.ai.copilotConnected) {
@@ -683,6 +716,32 @@ class Engine {
     }
   }
 
+  async discoverOpenRouterModels(apiKey: string) {
+    const key = apiKey.trim();
+    if (!key) return;
+    this.openRouterApiKey = key;
+    this.set({ ai: { ...this.state.ai, configured: false, busy: true, error: null } });
+    try {
+      const models = await listOpenRouterModels(key);
+      if (!models.length) throw new Error("No text models are available for this key");
+      this.set({
+        ai: {
+          ...this.state.ai,
+          configured: true,
+          busy: false,
+          models,
+          model: models.includes(this.state.ai.model) ? this.state.ai.model : models[0],
+          error: null,
+        },
+      });
+      this.log("info", `OpenRouter key verified — selected model ${models[0]}.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not load OpenRouter models";
+      this.set({ ai: { ...this.state.ai, configured: false, busy: false, error: detail } });
+      this.log("error", `OpenRouter model discovery failed — ${detail}.`);
+    }
+  }
+
   setGroqAutonomous(autonomous: boolean) {
     if (autonomous && (!this.state.ai.enabled || !this.state.ai.configured)) {
       this.log("error", "Enable and configure the selected AI provider before autonomous mode.");
@@ -700,6 +759,22 @@ class Engine {
         autonomous: false,
         configured: false,
         models: [...DEFAULT_GROQ_MODELS],
+        busy: false,
+        error: null,
+      },
+    });
+  }
+
+  clearOpenRouter() {
+    this.openRouterApiKey = "";
+    this.set({
+      ai: {
+        ...this.state.ai,
+        enabled: false,
+        autonomous: false,
+        configured: false,
+        models: [...DEFAULT_OPENROUTER_MODELS],
+        model: DEFAULT_OPENROUTER_MODELS[0],
         busy: false,
         error: null,
       },
@@ -1340,6 +1415,7 @@ class Engine {
     }
     if (!s.ai.enabled || s.phase !== "none" || s.ai.busy) return;
     if (s.ai.provider === "groq" && !this.groqApiKey) return;
+    if (s.ai.provider === "openrouter" && !this.openRouterApiKey) return;
     if (s.ai.provider === "copilot" && !s.ai.copilotConnected) return;
     if (Date.now() - this.lastAiPlanAt < 2500 || Date.now() < this.aiRetryAfter) return;
     const now = Date.now();
@@ -1376,7 +1452,9 @@ class Engine {
     const planRequest =
       s.ai.provider === "copilot"
         ? requestCopilotPlan(s.ai.copilotBaseUrl, s.ai.model, planInput)
-        : requestGroqPlan(this.groqApiKey, s.ai.model, planInput);
+        : s.ai.provider === "openrouter"
+          ? requestOpenRouterPlan(this.openRouterApiKey, s.ai.model, planInput)
+          : requestGroqPlan(this.groqApiKey, s.ai.model, planInput);
     void planRequest
       .then((plan) => {
         const current = this.state;
@@ -1482,11 +1560,9 @@ class Engine {
         phase: "none",
         currentDirection: null,
         contractMode: null,
-        proposalChecks: [
-          { id: "ai", label: "Groq AI decision", pass: false, detail: aiGate.detail },
-        ],
+        proposalChecks: [{ id: "ai", label: "AI decision", pass: false, detail: aiGate.detail }],
       });
-      this.log("reject", `ACCUMULATOR REJECTED — Groq AI: ${aiGate.detail}.`);
+      this.log("reject", `ACCUMULATOR REJECTED — ${s.ai.provider} AI: ${aiGate.detail}.`);
       return;
     }
     const req = buildAccumulatorProposalRequest(sym, stake, s.account!.currency, growthRate);
@@ -1561,11 +1637,12 @@ class Engine {
         phase: "none",
         currentDirection: null,
         contractMode: null,
-        proposalChecks: [
-          { id: "ai", label: "Groq AI decision", pass: false, detail: aiGate.detail },
-        ],
+        proposalChecks: [{ id: "ai", label: "AI decision", pass: false, detail: aiGate.detail }],
       });
-      this.log("reject", `${CONTRACTS[direction].label} REJECTED — Groq AI: ${aiGate.detail}.`);
+      this.log(
+        "reject",
+        `${CONTRACTS[direction].label} REJECTED — ${s.ai.provider} AI: ${aiGate.detail}.`,
+      );
       return;
     }
     const req = buildProposalRequest(direction, sym, stake, s.account!.currency);
@@ -1673,21 +1750,36 @@ class Engine {
     const ai = this.state.ai;
     if (!ai.enabled) return { pass: true, detail: "Disabled" };
     if (ai.provider === "copilot") return { pass: true, detail: "Copilot selected" };
-    if (!this.groqApiKey) return { pass: false, detail: "API key is not configured" };
+    const apiKey = ai.provider === "openrouter" ? this.openRouterApiKey : this.groqApiKey;
+    if (!apiKey) return { pass: false, detail: "API key is not configured" };
     this.set({ ai: { ...ai, busy: true, error: null } });
     try {
-      const result = await requestGroqSignal(this.groqApiKey, ai.model, {
-        symbol: sym,
-        proposedDirection: direction,
-        analysis: m.analysis,
-        confirmation: m.confirm,
-        latestDigits: m.quotes.slice(-20).map((q) => lastDigit(q, m.pip)),
-        recentLosses: this.state.lossLogs.slice(0, 10).map((loss) => ({
-          cause: loss.cause,
-          expectedValue: loss.expectedValue,
-          direction: loss.direction,
-        })),
-      });
+      const result =
+        ai.provider === "openrouter"
+          ? await requestOpenRouterSignal(apiKey, ai.model, {
+              symbol: sym,
+              proposedDirection: direction,
+              analysis: m.analysis,
+              confirmation: m.confirm,
+              latestDigits: m.quotes.slice(-20).map((q) => lastDigit(q, m.pip)),
+              recentLosses: this.state.lossLogs.slice(0, 10).map((loss) => ({
+                cause: loss.cause,
+                expectedValue: loss.expectedValue,
+                direction: loss.direction,
+              })),
+            })
+          : await requestGroqSignal(apiKey, ai.model, {
+              symbol: sym,
+              proposedDirection: direction,
+              analysis: m.analysis,
+              confirmation: m.confirm,
+              latestDigits: m.quotes.slice(-20).map((q) => lastDigit(q, m.pip)),
+              recentLosses: this.state.lossLogs.slice(0, 10).map((loss) => ({
+                cause: loss.cause,
+                expectedValue: loss.expectedValue,
+                direction: loss.direction,
+              })),
+            });
       const accepted = result.direction === direction && result.confidence >= 0.5;
       const detail = `${result.direction}, confidence ${(result.confidence * 100).toFixed(0)}%: ${result.reason}`;
       this.set({

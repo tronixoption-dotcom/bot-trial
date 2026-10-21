@@ -26,7 +26,7 @@ import {
   type LearningPattern,
   validateAccumulatorProposal,
 } from "./strategy";
-import { requestGroqSignal } from "./groq";
+import { requestGroqPlan, requestGroqSignal } from "./groq";
 
 export const VOL_SYMBOLS = [
   "R_10",
@@ -221,6 +221,7 @@ export interface State {
   haltReason: string | null;
   ai: {
     enabled: boolean;
+    autonomous: boolean;
     configured: boolean;
     model: string;
     busy: boolean;
@@ -316,6 +317,7 @@ class Engine {
     haltReason: null,
     ai: {
       enabled: false,
+      autonomous: false,
       configured: false,
       model: "llama-3.3-70b-versatile",
       busy: false,
@@ -334,6 +336,7 @@ class Engine {
   private buySentAt = 0;
   private inited = false;
   private groqApiKey = "";
+  private lastAiPlanAt = 0;
 
   subscribe = (l: () => void) => {
     this.listeners.add(l);
@@ -512,6 +515,10 @@ class Engine {
     return this.demoTradesSettled() >= DEMO_TRADES_REQUIRED && this.state.backtestDone;
   }
   enableReal(confirmText: string) {
+    if (this.state.ai.enabled || this.state.ai.autonomous) {
+      this.log("error", "Real trading is disabled while Groq AI mode is enabled. Use demo only.");
+      return;
+    }
     if (!this.canEnableReal()) {
       this.log(
         "error",
@@ -538,6 +545,7 @@ class Engine {
       ai: {
         ...this.state.ai,
         enabled,
+        autonomous: enabled ? this.state.ai.autonomous : false,
         configured: !!this.groqApiKey,
         model: selectedModel,
         error: null,
@@ -545,10 +553,25 @@ class Engine {
     });
   }
 
+  setGroqAutonomous(autonomous: boolean) {
+    if (autonomous && !this.state.ai.enabled) {
+      this.log("error", "Enable and configure Groq before starting autonomous AI mode.");
+      return;
+    }
+    this.set({ ai: { ...this.state.ai, autonomous } });
+  }
+
   clearGroq() {
     this.groqApiKey = "";
     this.set({
-      ai: { ...this.state.ai, enabled: false, configured: false, busy: false, error: null },
+      ai: {
+        ...this.state.ai,
+        enabled: false,
+        autonomous: false,
+        configured: false,
+        busy: false,
+        error: null,
+      },
     });
   }
 
@@ -630,6 +653,13 @@ class Engine {
     if (this.state.phase !== "none" || this.state.status === "running") {
       this.log("error", "Stop the bot before switching accounts.");
       return;
+    }
+    if (this.state.ai.enabled) {
+      const selected = this.state.accounts.find((account) => account.id === id);
+      if (selected && !selected.isVirtual) {
+        this.log("error", "Groq AI mode is demo-only. Select a virtual account.");
+        return;
+      }
     }
     this.set({ selectedAccount: id, cycle: null });
     this.log("info", `Switching to account ${id}.`);
@@ -1100,6 +1130,10 @@ class Engine {
       this.halt(`Daily take-profit target reached (${s.day.pnl.toFixed(2)}).`);
       return;
     }
+    if (s.ai.autonomous) {
+      this.evaluateAutonomous();
+      return;
+    }
     if (s.config.tradeMode === "accumulator") {
       const accumulatorSymbol = s.active;
       const accumulatorMarket = s.markets[accumulatorSymbol];
@@ -1167,6 +1201,98 @@ class Engine {
     this.attempt(sym, direction, m.epochs[m.epochs.length - 1]);
   }
 
+  private evaluateAutonomous() {
+    const s = this.state;
+    if (!s.account?.isVirtual) {
+      this.halt("Autonomous Groq AI mode is demo-only.");
+      return;
+    }
+    if (!s.ai.enabled || !this.groqApiKey || s.phase !== "none" || s.ai.busy) return;
+    if (Date.now() - this.lastAiPlanAt < 2500) return;
+    const now = Date.now();
+    const markets = Object.values(s.markets)
+      .filter(
+        (market) => market.lastTickAt !== null && now - market.lastTickAt <= s.config.maxTickAgeMs,
+      )
+      .map((market) => ({
+        symbol: market.symbol,
+        bullish: market.analysis.bullish,
+        bearish: market.analysis.bearish,
+        difference: market.analysis.difference,
+        direction: market.analysis.direction,
+        moves: market.analysis.moves,
+        fresh: true,
+        latestDigits: market.quotes.slice(-20).map((quote) => lastDigit(quote, market.pip)),
+      }));
+    if (!markets.length) return;
+    this.lastAiPlanAt = now;
+    this.set({ ai: { ...s.ai, busy: true, error: null } });
+    void requestGroqPlan(this.groqApiKey, s.ai.model, {
+      markets,
+      recentLosses: s.lossLogs.slice(0, 20).map((loss) => ({
+        symbol: loss.symbol,
+        cause: loss.cause,
+        expectedValue: loss.expectedValue,
+        direction: loss.direction,
+        loss: loss.loss,
+      })),
+      stake: s.config.stake,
+      takeProfit: s.config.dailyProfitTarget,
+      stopLoss: s.config.maxDailyLoss,
+    })
+      .then((plan) => {
+        const current = this.state;
+        const market = current.markets[plan.symbol];
+        const direction: Direction | null = plan.direction === "NONE" ? null : plan.direction;
+        const detail = `${plan.symbol} ${plan.direction}, confidence ${(plan.confidence * 100).toFixed(0)}%: ${plan.reason}`;
+        this.set({
+          ai: {
+            ...this.state.ai,
+            busy: false,
+            lastDecision: detail,
+            error: direction ? null : detail,
+          },
+        });
+        if (
+          !direction ||
+          plan.confidence < 0.5 ||
+          !market ||
+          !market.lastTickAt ||
+          Date.now() - market.lastTickAt > current.config.maxTickAgeMs
+        ) {
+          this.log("reject", `AUTONOMOUS AI — no eligible trade: ${detail}.`);
+          return;
+        }
+        const safety = this.context(plan.symbol).checks.filter((check) =>
+          [
+            "conn",
+            "auth",
+            "latency",
+            "fresh",
+            "symbol",
+            "stake",
+            "funds",
+            "busy",
+            "cooldown",
+            "risk",
+          ].includes(check.id),
+        );
+        const failed = safety.find((check) => !check.pass);
+        this.set({ checks: safety });
+        if (failed) {
+          this.log("reject", `AUTONOMOUS AI — ${failed.label}: ${failed.detail}.`);
+          return;
+        }
+        this.set({ active: plan.symbol });
+        this.attempt(plan.symbol, direction, market.epochs.at(-1) ?? 0, true);
+      })
+      .catch((error) => {
+        const detail = error instanceof Error ? error.message : "Groq plan failed";
+        this.set({ ai: { ...this.state.ai, busy: false, error: detail } });
+        this.log("reject", `AUTONOMOUS AI — ${detail}.`);
+      });
+  }
+
   private selectAccumulatorGrowthRate(m: Market) {
     const configured = this.state.config.accumulatorGrowthRate;
     if (!this.state.config.accumulatorAutoGrowth)
@@ -1202,6 +1328,19 @@ class Engine {
       contractMode: "accumulator",
       proposalChecks: [],
     });
+    const aiGate = await this.groqGate(sym, signal, m);
+    if (!aiGate.pass) {
+      this.set({
+        phase: "none",
+        currentDirection: null,
+        contractMode: null,
+        proposalChecks: [
+          { id: "ai", label: "Groq AI decision", pass: false, detail: aiGate.detail },
+        ],
+      });
+      this.log("reject", `ACCUMULATOR REJECTED — Groq AI: ${aiGate.detail}.`);
+      return;
+    }
     const req = buildAccumulatorProposalRequest(sym, stake, s.account!.currency, growthRate);
     const res = await this.send(req, 3000);
     const checks = validateAccumulatorProposal(res, { symbol: sym, stake, growthRate });
@@ -1246,7 +1385,12 @@ class Engine {
     this.trackAccumulator(Number(bought.buy.contract_id));
   }
 
-  private async attempt(sym: string, direction: Direction, signalEpoch: number) {
+  private async attempt(
+    sym: string,
+    direction: Direction,
+    signalEpoch: number,
+    aiAlreadyApproved = false,
+  ) {
     const s = this.state;
     const m = s.markets[sym];
     const digit = lastDigit(m.quotes[m.quotes.length - 1], m.pip);
@@ -1261,7 +1405,9 @@ class Engine {
       contractMode: "over-under",
       proposalChecks: [],
     });
-    const aiGate = await this.groqGate(sym, direction, m);
+    const aiGate = aiAlreadyApproved
+      ? { pass: true, detail: "Approved by autonomous Groq plan" }
+      : await this.groqGate(sym, direction, m);
     if (!aiGate.pass) {
       this.set({
         phase: "none",
@@ -1883,6 +2029,14 @@ class Engine {
     }
     if (!s.account.isVirtual && !s.realEnabled) {
       this.log("error", "This is a REAL account. Real trading is not enabled.");
+      return;
+    }
+    if (s.ai.autonomous && !s.account.isVirtual) {
+      this.log("error", "Groq AI mode is demo-only. Select a virtual account before starting.");
+      return;
+    }
+    if (s.ai.autonomous && !s.ai.enabled) {
+      this.log("error", "Configure and enable Groq before starting autonomous AI mode.");
       return;
     }
     if (this.dailyTargetReached()) {

@@ -313,6 +313,47 @@ function Controls({ s }: { s: State }) {
           disabled={!groqKey && !s.ai.configured}
           onCheckedChange={(enabled) => engine.configureGroq(groqKey, groqModel, enabled)}
         />
+        <Field l="Autonomous AI strategy (demo only)">
+          <Switch
+            checked={s.ai.autonomous}
+            disabled={!s.ai.enabled || !s.ai.configured || s.status === "running"}
+            onCheckedChange={(enabled) => engine.setGroqAutonomous(enabled)}
+          />
+        </Field>
+        {s.ai.autonomous && (
+          <>
+            <Field l="AI stake">
+              <Input
+                type="number"
+                min="0.35"
+                step="0.01"
+                defaultValue={c.stake}
+                disabled={s.status === "running"}
+                onBlur={num("stake")}
+              />
+            </Field>
+            <Field l="AI take-profit (daily, 0 = off)">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                defaultValue={c.dailyProfitTarget}
+                disabled={s.status === "running"}
+                onBlur={num("dailyProfitTarget")}
+              />
+            </Field>
+            <Field l="AI stop-loss (daily)">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                defaultValue={c.maxDailyLoss}
+                disabled={s.status === "running"}
+                onBlur={num("maxDailyLoss")}
+              />
+            </Field>
+          </>
+        )}
         <div className="text-xs text-muted-foreground">
           {s.ai.busy
             ? "Groq is reviewing the signal..."
@@ -322,6 +363,13 @@ function Controls({ s }: { s: State }) {
                 ? `Enabled · ${s.ai.model}`
                 : "Disabled"}
         </div>
+        {s.ai.enabled && (
+          <div className="text-xs text-warning">
+            {s.ai.autonomous
+              ? "DEMO ONLY — AI selects markets and directions from market data and recent loss-journal evidence."
+              : "AI receives recent loss-journal evidence and cannot trade a real account when autonomous mode is enabled."}
+          </div>
+        )}
         {s.ai.configured && (
           <Button
             variant="outline"

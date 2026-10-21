@@ -14,6 +14,14 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
+const GROQ_MODEL_PRESETS = [
+  { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B · fastest" },
+  { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B · balanced" },
+  { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B · fast reasoning" },
+  { id: "openai/gpt-oss-120b", label: "GPT-OSS 120B · strongest" },
+  { id: "qwen/qwen3.8-27b", label: "Qwen 3.8 27B · preview reasoning" },
+] as const;
+
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
@@ -303,10 +311,30 @@ function Controls({ s }: { s: State }) {
           value={groqKey}
           onChange={(e) => setGroqKey(e.target.value)}
         />
+        <select
+          className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+          value={GROQ_MODEL_PRESETS.some((model) => model.id === groqModel) ? groqModel : "custom"}
+          onChange={(e) => {
+            const next = e.target.value === "custom" ? groqModel : e.target.value;
+            setGroqModel(next);
+            if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
+          }}
+        >
+          {GROQ_MODEL_PRESETS.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.label}
+            </option>
+          ))}
+          <option value="custom">Custom model ID</option>
+        </select>
         <Input
-          placeholder="Model, e.g. llama-3.3-70b-versatile"
+          placeholder="Selected Groq model ID"
           value={groqModel}
-          onChange={(e) => setGroqModel(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setGroqModel(next);
+            if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
+          }}
         />
         <Switch
           checked={s.ai.enabled}

@@ -332,48 +332,53 @@ function Controls({ s }: { s: State }) {
               {s.ai.copilotConnected ? "GitHub Copilot connected" : "Connect GitHub Copilot"}
             </Button>
             <p className="text-xs text-muted-foreground">
-              Selecting Copilot opens GitHub authorization automatically. After approval, Copilot
-              is enabled and ready to use.
+              Selecting Copilot opens GitHub authorization automatically. After approval, Copilot is
+              enabled and ready to use.
             </p>
           </>
         )}
         <h3 className="label-xs">AI configuration</h3>
         <p className="text-xs text-muted-foreground">
           The selected AI chooses plans, but cannot bypass EV, proposal, balance, risk, stake, or
-          contract checks. Groq keys are memory-only.
+          contract checks.
+          {s.ai.provider === "groq" && " Groq keys are memory-only."}
         </p>
-        <Input
-          type="password"
-          placeholder="Groq API key"
-          value={groqKey}
-          onChange={(e) => setGroqKey(e.target.value)}
-          onBlur={() => void engine.discoverGroqModels(groqKey)}
-        />
-        <select
-          className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
-          value={s.ai.models.includes(groqModel) ? groqModel : "custom"}
-          onChange={(e) => {
-            const next = e.target.value === "custom" ? groqModel : e.target.value;
-            setGroqModel(next);
-            if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
-          }}
-        >
-          {s.ai.models.map((model) => (
-            <option key={model} value={model}>
-              {model}
-            </option>
-          ))}
-          <option value="custom">Custom model ID</option>
-        </select>
-        <Input
-          placeholder="Selected Groq model ID"
-          value={groqModel}
-          onChange={(e) => {
-            const next = e.target.value;
-            setGroqModel(next);
-            if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
-          }}
-        />
+        {s.ai.provider === "groq" && (
+          <>
+            <Input
+              type="password"
+              placeholder="Groq API key"
+              value={groqKey}
+              onChange={(e) => setGroqKey(e.target.value)}
+              onBlur={() => void engine.discoverGroqModels(groqKey)}
+            />
+            <select
+              className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
+              value={s.ai.models.includes(groqModel) ? groqModel : "custom"}
+              onChange={(e) => {
+                const next = e.target.value === "custom" ? groqModel : e.target.value;
+                setGroqModel(next);
+                if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
+              }}
+            >
+              {s.ai.models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+              <option value="custom">Custom model ID</option>
+            </select>
+            <Input
+              placeholder="Selected Groq model ID"
+              value={groqModel}
+              onChange={(e) => {
+                const next = e.target.value;
+                setGroqModel(next);
+                if (s.ai.enabled) engine.configureGroq(groqKey, next, true);
+              }}
+            />
+          </>
+        )}
         <Switch
           checked={s.ai.enabled}
           disabled={
@@ -442,7 +447,7 @@ function Controls({ s }: { s: State }) {
               : "AI receives recent loss-journal evidence and cannot trade a real account when autonomous mode is enabled."}
           </div>
         )}
-        {s.ai.configured && (
+        {s.ai.provider === "groq" && s.ai.configured && (
           <Button
             variant="outline"
             className="w-full"

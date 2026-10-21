@@ -55,6 +55,17 @@ function Dashboard() {
   const cur = s.account?.currency ?? "";
   const target = s.cycle ? cycleTarget(s.cycle.start) : null;
   const equity = s.cycle ? s.cycle.start + s.cycle.profit : null;
+  const rawDirection = m?.analysis.direction ?? null;
+  const modeDirection =
+    s.config.tradeMode === "over-only"
+      ? rawDirection === "OVER2"
+        ? rawDirection
+        : null
+      : s.config.tradeMode === "under-only"
+        ? rawDirection === "UNDER7"
+          ? rawDirection
+          : null
+        : rawDirection;
 
   return (
     <main className="mx-auto max-w-[1500px] p-4 space-y-4">
@@ -122,7 +133,7 @@ function Dashboard() {
               <Stat
                 l="Difference"
                 v={m ? `${m.analysis.difference}` : "–"}
-                tone={m && m.analysis.difference >= 5 ? "up" : "down"}
+                tone={m && m.analysis.difference >= s.config.minDifference ? "up" : "down"}
               />
               <Stat
                 l="Latest tick"
@@ -131,13 +142,14 @@ function Dashboard() {
               <Stat l="Last digit" v={digit ?? "–"} big />
               <Stat
                 l="Signal"
-                v={m?.analysis.direction ? CONTRACTS[m.analysis.direction].label : "NONE"}
-                tone={m?.analysis.direction ? "up" : undefined}
+                v={modeDirection ? CONTRACTS[modeDirection].label : "NONE"}
+                tone={modeDirection ? "up" : undefined}
               />
             </div>
             <p className="mt-3 text-xs text-muted-foreground">
               Score = % of up vs down moves over last {s.config.sampleSize} ticks. Qualifies at
-              difference ≥ 5. Status: <b className="text-foreground">{m?.reject ?? "–"}</b>
+              difference ≥ {s.config.minDifference}. Status:{" "}
+              {<b className="text-foreground">{m?.reject ?? "–"}</b>}
             </p>
           </div>
 
@@ -544,7 +556,11 @@ function Markets({ s }: { s: State }) {
                 <td className="py-1">{m.symbol}</td>
                 <td>{m.analysis.bullish}</td>
                 <td>{m.analysis.bearish}</td>
-                <td className={m.analysis.difference >= 5 ? "text-success" : "text-danger"}>
+                <td
+                  className={
+                    m.analysis.difference >= s.config.minDifference ? "text-success" : "text-danger"
+                  }
+                >
                   {m.analysis.difference}
                 </td>
                 <td>{m.quotes.length ? lastDigit(m.quotes[m.quotes.length - 1], m.pip) : "–"}</td>

@@ -1,0 +1,1236 @@
+import {
+  analyze,
+  backtest,
+  buildProposalRequest,
+  cycleComplete,
+  cycleTarget,
+  digitDistribution,
+  evaluateEntry,
+  expectedValue,
+  lastDigit,
+  nextStake,
+  pipSizeFromPip,
+  rankMarkets,
+  rejectionMessage,
+  riskBlock,
+  validateProposal,
+  CONTRACTS,
+  CONTRACT_DURATION,
+  DURATION_UNIT,
+  learningBlock,
+  type Analysis,
+  type BacktestResult,
+  type Check,
+  type Direction,
+  type LearningPattern,
+} from "./strategy";
+
+export const VOL_SYMBOLS = [
+  "R_10",
+  "R_25",
+  "R_50",
+  "R_75",
+  "R_100",
+  "1HZ10V",
+  "1HZ25V",
+  "1HZ50V",
+  "1HZ75V",
+  "1HZ100V",
+];
+const LS = "deriv-ou-bot-v1";
+const DEMO_TRADES_REQUIRED = 20;
+
+export interface Config {
+  appId: string;
+  stake: number;
+  maxDailyLoss: number;
+  maxDrawdown: number;
+  maxConsecLosses: number;
+  sampleSize: number;
+  minSample: number;
+  cooldownSec: number;
+  autoSwitch: boolean;
+  manualSymbol: string;
+  autoRestart: boolean;
+  maxTickAgeMs: number;
+  maxLatencyMs: number;
+  minEV: number;
+}
+export interface Market {
+  symbol: string;
+  name: string;
+  pip: number;
+  quotes: number[];
+  epochs: number[];
+  lastTickAt: number | null;
+  analysis: Analysis;
+  confirm: Analysis;
+  reject: string;
+}
+export interface TradeRec {
+  id: string;
+  time: number;
+  symbol: string;
+  direction: Direction;
+  entryDigit: number;
+  stake: number;
+  payout: number;
+  profit: number;
+  won: boolean;
+  virtual: boolean;
+  contractId: number;
+}
+export interface CycleRec {
+  start: number;
+  end: number;
+  profit: number;
+  wins: number;
+  losses: number;
+  startedAt: number;
+  endedAt: number;
+  tradeIds: string[];
+}
+export interface LogRec {
+  t: number;
+  kind: "accept" | "reject" | "exec" | "settle" | "switch" | "error" | "info";
+  msg: string;
+}
+export type LossCause =
+  "weak-signal" | "poor-value" | "execution-risk" | "normal-variance" | "insufficient-evidence";
+export interface LossLog {
+  id: string;
+  time: number;
+  symbol: string;
+  direction: Direction;
+  entryDigit: number;
+  exitDigit: number | null;
+  stake: number;
+  payout: number;
+  loss: number;
+  virtual: boolean;
+  contractId: number;
+  cause: LossCause;
+  reason: string;
+  signalEpoch: number | null;
+  settledEpoch: number | null;
+  analysis: Analysis;
+  confirmation: Analysis;
+  pWin: number;
+  expectedValue: number;
+  latencyMs: number | null;
+  tickAgeMs: number | null;
+  proposalAgeMs: number | null;
+  entryChecks: Check[];
+  proposalChecks: Check[];
+  consecutiveLosses: number;
+  dailyPnl: number;
+}
+export interface LearningState {
+  total: number;
+  wins: number;
+  losses: number;
+  patterns: Record<string, LearningPattern>;
+  updatedAt: number | null;
+}
+type Phase = "none" | "proposing" | "buying" | "open" | "reconciling";
+type DecisionMeta = {
+  signalEpoch: number | null;
+  analysis: Analysis;
+  confirmation: Analysis;
+  pWin: number;
+  expectedValue: number;
+  latencyMs: number | null;
+  tickAgeMs: number | null;
+  proposalAgeMs: number | null;
+  entryChecks: Check[];
+  proposalChecks: Check[];
+};
+
+export interface State {
+  config: Config;
+  status: "idle" | "running" | "paused" | "stopped" | "emergency";
+  connected: boolean;
+  authorized: boolean;
+  latencyMs: number | null;
+  account: { loginid: string; isVirtual: boolean; currency: string; balance: number } | null;
+  accounts: { id: string; isVirtual: boolean; currency: string; balance: number }[];
+  selectedAccount: string | null;
+  markets: Record<string, Market>;
+  active: string;
+  phase: Phase;
+  currentDirection: Direction | null;
+  contractId: number | null;
+  lastSettledAt: number;
+  cycle: {
+    start: number;
+    profit: number;
+    wins: number;
+    losses: number;
+    startedAt: number;
+    tradeIds: string[];
+    peak: number;
+  } | null;
+  day: { date: string; pnl: number };
+  consecLosses: number;
+  checks: Check[];
+  proposalChecks: Check[];
+  logs: LogRec[];
+  trades: TradeRec[];
+  lossLogs: LossLog[];
+  cycles: CycleRec[];
+  learning: LearningState;
+  realEnabled: boolean;
+  backtestDone: boolean;
+  backtest: (BacktestResult & { symbol: string }) | null;
+  haltReason: string | null;
+}
+
+const emptyA: Analysis = {
+  sufficient: false,
+  moves: 0,
+  bullish: 0,
+  bearish: 0,
+  difference: 0,
+  trend: "FLAT",
+  qualifies: false,
+  direction: null,
+};
+const today = () => new Date().toISOString().slice(0, 10);
+
+export const defaultConfig: Config = {
+  appId: "",
+  stake: 1,
+  maxDailyLoss: 10,
+  maxDrawdown: 10,
+  maxConsecLosses: 5,
+  sampleSize: 50,
+  minSample: 30,
+  cooldownSec: 3,
+  autoSwitch: true,
+  manualSymbol: "R_100",
+  autoRestart: true,
+  maxTickAgeMs: 4000,
+  maxLatencyMs: 1500,
+  minEV: 0,
+};
+
+class Engine {
+  state: State = {
+    config: { ...defaultConfig },
+    status: "idle",
+    connected: false,
+    authorized: false,
+    latencyMs: null,
+    account: null,
+    accounts: [],
+    selectedAccount: null,
+    markets: {},
+    active: "R_100",
+    phase: "none",
+    currentDirection: null,
+    contractId: null,
+    lastSettledAt: 0,
+    cycle: null,
+    day: { date: today(), pnl: 0 },
+    consecLosses: 0,
+    checks: [],
+    proposalChecks: [],
+    logs: [],
+    trades: [],
+    lossLogs: [],
+    cycles: [],
+    learning: { total: 0, wins: 0, losses: 0, patterns: {}, updatedAt: null },
+    realEnabled: false,
+    backtestDone: false,
+    backtest: null,
+    haltReason: null,
+  };
+  private listeners = new Set<() => void>();
+  private ws: WebSocket | null = null;
+  private token = ""; // memory only, never persisted
+  private reqId = 1;
+  private pending = new Map<number, (m: any) => void>();
+  private pingTimer: any = null;
+  private manualClose = false;
+  private lastReject = "";
+  private buySentAt = 0;
+  private inited = false;
+
+  subscribe = (l: () => void) => {
+    this.listeners.add(l);
+    return () => this.listeners.delete(l);
+  };
+  getState = () => this.state;
+  private set(p: Partial<State>) {
+    this.state = { ...this.state, ...p };
+    this.listeners.forEach((l) => l());
+  }
+  private persist() {
+    const { config, trades, cycles, lossLogs, logs, day, consecLosses, backtestDone, learning } =
+      this.state;
+    try {
+      localStorage.setItem(
+        LS,
+        JSON.stringify({
+          config,
+          trades,
+          cycles,
+          lossLogs: lossLogs.slice(0, 300),
+          logs: logs.slice(0, 300),
+          day,
+          consecLosses,
+          backtestDone,
+          learning,
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+  init() {
+    if (this.inited) return;
+    this.inited = true;
+    try {
+      const s = JSON.parse(localStorage.getItem(LS) || "null");
+      if (s)
+        this.set({
+          ...s,
+          config: { ...defaultConfig, ...s.config },
+          lossLogs: Array.isArray(s.lossLogs) ? s.lossLogs : [],
+          learning: s.learning?.patterns
+            ? {
+                total: Number(s.learning.total ?? 0),
+                wins: Number(s.learning.wins ?? 0),
+                losses: Number(s.learning.losses ?? 0),
+                patterns: s.learning.patterns,
+                updatedAt: s.learning.updatedAt ?? null,
+              }
+            : this.state.learning,
+          day: s.day?.date === today() ? s.day : { date: today(), pnl: 0 },
+        });
+    } catch {
+      /* ignore */
+    }
+  }
+  log(kind: LogRec["kind"], msg: string) {
+    this.set({ logs: [{ t: Date.now(), kind, msg }, ...this.state.logs].slice(0, 500) });
+    if (kind !== "reject") this.persist();
+  }
+
+  updateConfig(p: Partial<Config>) {
+    if (this.state.phase !== "none" && "stake" in p) {
+      this.log("error", "Stake change refused — a trade is in progress.");
+      delete p.stake;
+    }
+    if (p.stake !== undefined && !(p.stake >= 0.35)) {
+      this.log("error", "Stake must be at least 0.35.");
+      delete p.stake;
+    }
+    this.set({ config: { ...this.state.config, ...p } });
+    this.persist();
+  }
+  demoTradesSettled() {
+    return this.state.trades.filter((t) => t.virtual).length;
+  }
+  canEnableReal() {
+    return this.demoTradesSettled() >= DEMO_TRADES_REQUIRED && this.state.backtestDone;
+  }
+  enableReal(confirmText: string) {
+    if (!this.canEnableReal()) {
+      this.log(
+        "error",
+        `Real trading needs ${DEMO_TRADES_REQUIRED} settled demo trades and a completed backtest.`,
+      );
+      return;
+    }
+    if (confirmText !== "ENABLE REAL") {
+      this.log("error", "Confirmation text did not match.");
+      return;
+    }
+    this.set({ realEnabled: true });
+    this.log("info", "Real-money trading explicitly enabled by user.");
+  }
+  disableReal() {
+    this.set({ realEnabled: false });
+    this.log("info", "Real-money trading disabled.");
+  }
+
+  // ---------- connection ----------
+  // New Deriv API (PAT tokens "pat_..."): REST lists accounts, then an OTP gives a one-time WebSocket URL.
+  // Legacy tokens: old WebSocket + authorize call.
+  private isPat() {
+    return this.token.startsWith("pat_");
+  }
+  private rest(path: string, method = "GET") {
+    return fetch(`https://api.derivws.com/trading/v1/options${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Deriv-App-ID": this.state.config.appId.trim(),
+      },
+    }).then(async (r) => {
+      const txt = await r.text();
+      let j: any = null;
+      try {
+        j = JSON.parse(txt);
+      } catch {
+        /* text */
+      }
+      if (!r.ok) throw new Error(j?.errors?.[0]?.message ?? (txt || `HTTP ${r.status}`));
+      return j;
+    });
+  }
+  async connect(token: string) {
+    this.token = token.trim();
+    this.manualClose = false;
+    if (!this.token) return;
+    if (this.isPat()) {
+      const aid = this.state.config.appId.trim();
+      if (!aid || aid === "1089") {
+        this.log(
+          "error",
+          "pat_ tokens need your own App ID: register an app at developers.deriv.com and paste its App ID in the App ID box.",
+        );
+        return;
+      }
+      this.log("info", "Checking token with Deriv…");
+      try {
+        const r = await this.rest("/accounts");
+        const list: any[] = Array.isArray(r) ? r : (r?.data ?? r?.accounts ?? []);
+        const accounts = list.map((a) => ({
+          id: String(a.account_id ?? a.loginid ?? a.id),
+          isVirtual: a.account_type
+            ? String(a.account_type).toLowerCase() === "demo"
+            : !!(a.is_virtual ?? a.is_demo),
+          currency: a.currency ?? "USD",
+          balance: Number(a.balance ?? 0),
+        }));
+        if (!accounts.length) {
+          this.log("error", "No Options trading accounts found for this token.");
+          return;
+        }
+        const pick =
+          accounts.find((a) => a.id === this.state.selectedAccount) ??
+          accounts.find((a) => a.isVirtual) ??
+          accounts[0];
+        this.set({ accounts, selectedAccount: pick.id });
+        this.log(
+          "info",
+          `Found ${accounts.length} account(s). Using ${pick.id} (${pick.isVirtual ? "DEMO" : "REAL"}).`,
+        );
+      } catch (e: any) {
+        const msg = String(e.message);
+        this.log(
+          "error",
+          `Token check failed: ${msg}${/application/i.test(msg) ? " — the App ID must be one you registered at developers.deriv.com (old App IDs like 1089 don't work with pat_ tokens)." : ""}`,
+        );
+        return;
+      }
+    }
+    this.open();
+  }
+  selectAccount(id: string) {
+    if (this.state.phase !== "none" || this.state.status === "running") {
+      this.log("error", "Stop the bot before switching accounts.");
+      return;
+    }
+    this.set({ selectedAccount: id, cycle: null });
+    this.log("info", `Switching to account ${id}.`);
+    if (this.token) this.open();
+  }
+  disconnect() {
+    this.manualClose = true;
+    this.stop("Disconnected by user");
+    this.ws?.close();
+  }
+  private async open() {
+    const old = this.ws;
+    this.ws = null;
+    old?.close();
+    let url = `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(this.state.config.appId || "1089")}`;
+    if (this.isPat()) {
+      try {
+        const r = await this.rest(
+          `/accounts/${encodeURIComponent(this.state.selectedAccount ?? "")}/otp`,
+          "POST",
+        );
+        url = r?.data?.url ?? r?.url;
+        if (!url) throw new Error("No WebSocket URL in OTP response");
+      } catch (e: any) {
+        this.log("error", `Could not open trading connection: ${e.message}`);
+        if (!this.manualClose) setTimeout(() => this.open(), 5000);
+        return;
+      }
+    }
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.onopen = async () => {
+      this.set({ connected: true });
+      this.log("info", "API connected.");
+      this.startPing();
+      if (this.isPat()) {
+        const acc = this.state.accounts.find((a) => a.id === this.state.selectedAccount)!;
+        this.set({
+          authorized: true,
+          account: {
+            loginid: acc.id,
+            isVirtual: acc.isVirtual,
+            currency: acc.currency,
+            balance: acc.balance,
+          },
+        });
+        this.log("info", `Authorized ${acc.id} (${acc.isVirtual ? "DEMO" : "REAL"}).`);
+        this.send({ balance: 1, subscribe: 1 }).then((b) => {
+          if (b.error) this.log("error", `Balance: ${b.error.message}`);
+        });
+      } else if (this.token) await this.authorize();
+      await this.loadMarkets();
+      if (
+        this.state.phase === "buying" ||
+        this.state.phase === "open" ||
+        this.state.phase === "reconciling"
+      )
+        await this.reconcile();
+    };
+    ws.onerror = () => {
+      if (this.ws === ws) this.log("error", "WebSocket error.");
+    };
+    ws.onmessage = (ev) => this.onMessage(JSON.parse(ev.data));
+    ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.set({ connected: false, authorized: false, latencyMs: null });
+      clearInterval(this.pingTimer);
+      this.pending.forEach((r) => r({ error: { message: "Connection closed" } }));
+      this.pending.clear();
+      if (this.state.phase === "buying" || this.state.phase === "open")
+        this.set({ phase: "reconciling" });
+      this.log("error", "API connection lost — trading suspended.");
+      if (!this.manualClose) setTimeout(() => this.open(), 2000);
+    };
+  }
+  private send(req: Record<string, unknown>, timeoutMs = 8000): Promise<any> {
+    return new Promise((resolve) => {
+      if (!this.ws || this.ws.readyState !== 1)
+        return resolve({ error: { message: "Not connected" } });
+      const id = this.reqId++;
+      const to = setTimeout(() => {
+        if (this.pending.delete(id)) resolve({ error: { message: "Timeout", code: "Timeout" } });
+      }, timeoutMs);
+      this.pending.set(id, (m) => {
+        clearTimeout(to);
+        resolve(m);
+      });
+      this.ws.send(JSON.stringify({ ...req, req_id: id }));
+    });
+  }
+  private startPing() {
+    clearInterval(this.pingTimer);
+    const ping = async () => {
+      const t = Date.now();
+      const r = await this.send({ ping: 1 }, 5000);
+      this.set({ latencyMs: r.error ? null : Date.now() - t });
+    };
+    ping();
+    this.pingTimer = setInterval(ping, 5000);
+  }
+  private async authorize() {
+    const r = await this.send({ authorize: this.token });
+    if (r.error) {
+      this.log("error", `Authorization failed: ${r.error.message}`);
+      return;
+    }
+    const a = r.authorize;
+    this.set({
+      authorized: true,
+      account: {
+        loginid: a.loginid,
+        isVirtual: !!a.is_virtual,
+        currency: a.currency,
+        balance: Number(a.balance),
+      },
+    });
+    this.log("info", `Authorized ${a.loginid} (${a.is_virtual ? "DEMO" : "REAL"}).`);
+    this.send({ balance: 1, subscribe: 1 });
+  }
+  private async loadMarkets() {
+    const r = await this.send({ active_symbols: "brief" });
+    if (r.error) {
+      this.log("error", `active_symbols failed: ${r.error.message}`);
+      return;
+    }
+    const avail = (r.active_symbols as any[]).filter(
+      (s) =>
+        VOL_SYMBOLS.includes(s.underlying_symbol ?? s.symbol) &&
+        s.exchange_is_open &&
+        !s.is_trading_suspended,
+    );
+    const markets: Record<string, Market> = {};
+    for (const s of avail)
+      markets[s.underlying_symbol ?? s.symbol] = {
+        symbol: s.underlying_symbol ?? s.symbol,
+        name: s.underlying_symbol_name ?? s.display_name,
+        pip: pipSizeFromPip(Number(s.pip_size ?? s.pip)),
+        quotes: [],
+        epochs: [],
+        lastTickAt: null,
+        analysis: emptyA,
+        confirm: emptyA,
+        reject: "Loading history",
+      };
+    this.set({ markets });
+    await this.send({ forget_all: "ticks" });
+    const count = Math.max(this.state.config.sampleSize + 2, 1000);
+    await Promise.all(
+      Object.keys(markets).map(async (sym) => {
+        const h = await this.send({
+          ticks_history: sym,
+          count,
+          end: "latest",
+          style: "ticks",
+          subscribe: 1,
+        });
+        if (h.error) {
+          this.log("error", `${sym} history failed: ${h.error.message}`);
+          return;
+        }
+        const m = this.state.markets[sym];
+        if (!m) return;
+        const pip = h.pip_size ?? m.pip;
+        this.set({
+          markets: {
+            ...this.state.markets,
+            [sym]: this.recompute({
+              ...m,
+              pip,
+              quotes: h.history.prices.map(Number),
+              epochs: h.history.times.map(Number),
+              lastTickAt: Date.now(),
+            }),
+          },
+        });
+      }),
+    );
+    this.log("info", `Streaming ${Object.keys(markets).length} volatility markets.`);
+  }
+  private recompute(m: Market): Market {
+    const { sampleSize, minSample } = this.state.config;
+    return {
+      ...m,
+      analysis: analyze(m.quotes, sampleSize, minSample),
+      confirm: analyze(m.quotes.slice(0, -1), sampleSize, minSample),
+    };
+  }
+
+  private learningKey(symbol: string, direction: Direction, entryDigit: number) {
+    return `${symbol}|${direction}|entry-${entryDigit}`;
+  }
+  private learnedBlock(symbol: string, direction: Direction | null, entryDigit: number | null) {
+    if (!direction || entryDigit === null) return null;
+    return learningBlock(
+      this.state.learning.patterns[this.learningKey(symbol, direction, entryDigit)],
+    );
+  }
+  private recordLearning(trade: TradeRec): LearningState {
+    const key = this.learningKey(trade.symbol, trade.direction, trade.entryDigit);
+    const previous = this.state.learning.patterns[key] ?? {
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      profit: 0,
+    };
+    const pattern = {
+      trades: previous.trades + 1,
+      wins: previous.wins + (trade.won ? 1 : 0),
+      losses: previous.losses + (trade.won ? 0 : 1),
+      profit: previous.profit + trade.profit,
+    };
+    return {
+      total: this.state.learning.total + 1,
+      wins: this.state.learning.wins + (trade.won ? 1 : 0),
+      losses: this.state.learning.losses + (trade.won ? 0 : 1),
+      patterns: { ...this.state.learning.patterns, [key]: pattern },
+      updatedAt: Date.now(),
+    };
+  }
+
+  private onMessage(m: any) {
+    if (m.req_id && this.pending.has(m.req_id)) {
+      const r = this.pending.get(m.req_id)!;
+      this.pending.delete(m.req_id);
+      r(m);
+    }
+    if (m.msg_type === "tick" && m.tick) this.onTick(m.tick);
+    if (m.msg_type === "balance" && m.balance && this.state.account)
+      this.set({
+        account: {
+          ...this.state.account,
+          balance: Number(m.balance.balance),
+          currency: m.balance.currency || this.state.account.currency,
+        },
+      });
+    if (m.msg_type === "proposal_open_contract" && m.proposal_open_contract)
+      this.onContract(m.proposal_open_contract);
+  }
+
+  private onTick(t: any) {
+    const m = this.state.markets[t.symbol];
+    if (!m) return;
+    if (m.epochs.length && Number(t.epoch) <= m.epochs[m.epochs.length - 1]) return;
+    const keep = Math.max(this.state.config.sampleSize + 2, 1000);
+    const nm = this.recompute({
+      ...m,
+      pip: t.pip_size ?? m.pip,
+      quotes: [...m.quotes, Number(t.quote)].slice(-keep),
+      epochs: [...m.epochs, Number(t.epoch)].slice(-keep),
+      lastTickAt: Date.now(),
+    });
+    nm.reject = !nm.analysis.sufficient
+      ? "Insufficient sample"
+      : !nm.analysis.qualifies
+        ? `Difference ${nm.analysis.difference} < 5`
+        : nm.confirm.direction !== nm.analysis.direction
+          ? "Direction not double-confirmed"
+          : "Qualifies";
+    this.set({ markets: { ...this.state.markets, [t.symbol]: nm } });
+    this.maybeSwitch();
+    if (t.symbol === this.state.active) this.evaluate();
+  }
+
+  private maybeSwitch() {
+    const s = this.state;
+    if (s.phase !== "none") return;
+    if (!s.config.autoSwitch) {
+      if (s.active !== s.config.manualSymbol) this.set({ active: s.config.manualSymbol });
+      return;
+    }
+    const now = Date.now();
+    const ranked = rankMarkets(
+      Object.values(s.markets).map((m) => ({
+        ...m,
+        fresh: !!m.lastTickAt && now - m.lastTickAt <= s.config.maxTickAgeMs,
+        confirmed: m.confirm.direction === m.analysis.direction,
+      })),
+    );
+    const cur = s.markets[s.active];
+    const best = ranked[0];
+    if (
+      best &&
+      best.symbol !== s.active &&
+      (!cur || cur.reject !== "Qualifies" || best.analysis.difference > cur.analysis.difference)
+    ) {
+      this.set({ active: best.symbol });
+      this.log(
+        "switch",
+        `MARKET SWITCHED — ${cur?.name ?? s.active}: ${cur?.reject ?? "unavailable"}. Now ${best.name} (difference ${best.analysis.difference}).`,
+      );
+      this.lastReject = "";
+    }
+  }
+
+  private context(sym: string) {
+    const s = this.state;
+    const m = s.markets[sym];
+    const now = Date.now();
+    const c = s.config;
+    const equity = s.cycle ? s.cycle.start + s.cycle.profit : 0;
+    let rb = s.cycle
+      ? riskBlock(
+          { dailyPnl: s.day.pnl, peakEquity: s.cycle.peak, equity, consecLosses: s.consecLosses },
+          c,
+        )
+      : "Cycle not started";
+    if (!rb && s.status !== "running") rb = `Bot is ${s.status}`;
+    const stake = nextStake(c.stake, s.trades);
+    return evaluateEntry({
+      connected: s.connected,
+      authorized: s.authorized,
+      latencyMs: s.latencyMs,
+      maxLatencyMs: c.maxLatencyMs,
+      tickAgeMs: m?.lastTickAt ? now - m.lastTickAt : null,
+      maxTickAgeMs: c.maxTickAgeMs,
+      symbolSupported: !!m,
+      analysis: m?.analysis ?? emptyA,
+      confirmAnalysis: m?.confirm ?? emptyA,
+      latestDigit: m && m.quotes.length ? lastDigit(m.quotes[m.quotes.length - 1], m.pip) : null,
+      stake,
+      fixedStake: c.stake,
+      balance: s.account?.balance ?? null,
+      busy: s.phase !== "none",
+      riskBlock: rb,
+      cooldownRemainingMs: s.lastSettledAt + c.cooldownSec * 1000 - now,
+      realAccountBlocked: !!s.account && !s.account.isVirtual && !s.realEnabled,
+      learningBlock: this.learnedBlock(
+        sym,
+        m?.analysis.direction ?? null,
+        m && m.quotes.length ? lastDigit(m.quotes[m.quotes.length - 1], m.pip) : null,
+      ),
+    });
+  }
+
+  private evaluate() {
+    const s = this.state;
+    if (s.status !== "running") {
+      this.set({ checks: this.context(s.active).checks });
+      return;
+    }
+    const sym = s.active;
+    const { checks, direction } = this.context(sym);
+    const m = s.markets[sym];
+    // risk halts
+    const risk = checks.find((k) => k.id === "risk");
+    if (risk && !risk.pass && s.phase === "none" && !risk.detail.startsWith("Bot is")) {
+      this.set({ checks });
+      this.halt(risk.detail);
+      return;
+    }
+    const funds = checks.find((k) => k.id === "funds");
+    if (funds && !funds.pass && s.account && s.phase === "none") {
+      this.set({ checks });
+      this.halt("Balance cannot cover the fixed stake");
+      return;
+    }
+    this.set({ checks });
+    if (!direction) {
+      const msg = rejectionMessage(checks, m?.analysis.direction ?? null);
+      if (msg && msg !== this.lastReject) {
+        this.lastReject = msg;
+        this.log("reject", `[${sym}] ${msg}`);
+      }
+      return;
+    }
+    this.attempt(sym, direction, m.epochs[m.epochs.length - 1]);
+  }
+
+  private async attempt(sym: string, direction: Direction, signalEpoch: number) {
+    const s = this.state;
+    const m = s.markets[sym];
+    const digit = lastDigit(m.quotes[m.quotes.length - 1], m.pip);
+    const entrySnapshot = this.context(sym).checks;
+    // EV filter uses actual payout from proposal + historical digit distribution
+    const digits = m.quotes.slice(-s.config.sampleSize).map((q) => lastDigit(q, m.pip));
+    const dist = digitDistribution(digits);
+    const stake = s.config.stake;
+    this.set({ phase: "proposing", currentDirection: direction, proposalChecks: [] });
+    const req = buildProposalRequest(direction, sym, stake, s.account!.currency);
+    const proposalSentAt = Date.now();
+    const res = await this.send(req, 3000);
+    const recvAt = Date.now();
+    const pChecks = validateProposal(res, { direction, symbol: sym, stake }, recvAt, Date.now());
+    const pWin = direction === "OVER2" ? dist.pOver2 : dist.pUnder7;
+    const ev = res.proposal ? expectedValue(pWin, stake, Number(res.proposal.payout)) : -Infinity;
+    pChecks.push({
+      id: "p_ev",
+      label: `Expected value > ${s.config.minEV}`,
+      pass: ev > s.config.minEV,
+      detail: `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
+    });
+    // Revalidate everything right before purchase
+    const again = this.context(sym);
+    const cur = this.state.markets[sym];
+    pChecks.push({
+      id: "p_same_tick",
+      label: "Signal tick still latest",
+      pass: cur?.epochs[cur.epochs.length - 1] === signalEpoch,
+      detail: "No newer tick",
+    });
+    pChecks.push({
+      id: "p_revalidate",
+      label: "All entry checks re-pass",
+      pass: again.checks.every((k) => k.pass || k.id === "busy"),
+      detail: again.checks.find((k) => !k.pass && k.id !== "busy")?.label ?? "OK",
+    });
+    pChecks.push({
+      id: "p_market",
+      label: "Market unchanged",
+      pass: this.state.active === sym,
+      detail: this.state.active,
+    });
+    this.set({ proposalChecks: pChecks });
+    const failed = pChecks.find((k) => !k.pass);
+    if (failed) {
+      if (res.proposal?.id) this.send({ forget: res.proposal.id });
+      this.lastDecisionMeta = null;
+      this.set({ phase: "none", currentDirection: null });
+      this.log(
+        failed.id === "p_duration" || failed.id === "p_unit" ? "error" : "reject",
+        `${CONTRACTS[direction].label} REJECTED — ${failed.label}: ${failed.detail}.`,
+      );
+      return;
+    }
+    this.lastDecisionMeta = {
+      signalEpoch,
+      analysis: m.analysis,
+      confirmation: m.confirm,
+      pWin,
+      expectedValue: ev,
+      latencyMs: s.latencyMs,
+      tickAgeMs: m.lastTickAt ? Date.now() - m.lastTickAt : null,
+      proposalAgeMs: recvAt - proposalSentAt,
+      entryChecks: entrySnapshot,
+      proposalChecks: pChecks,
+    };
+    this.set({ phase: "buying" });
+    this.buySentAt = Date.now();
+    this.log(
+      "exec",
+      `TRADE EXECUTED — ${CONTRACTS[direction].label} on ${m.name}, digit ${digit}, stake ${stake}, ${CONTRACT_DURATION}${DURATION_UNIT}. All required checks passed.`,
+    );
+    const b = await this.send({ buy: res.proposal.id, price: stake }, 10000);
+    if (b.error) {
+      if (b.error.code === "Timeout" || b.error.message === "Connection closed") {
+        this.set({ phase: "reconciling" });
+        this.log("error", "Purchase response delayed — reconciling with API before any new trade.");
+        this.reconcile();
+        return;
+      }
+      this.lastDecisionMeta = null;
+      this.set({ phase: "none", currentDirection: null });
+      this.log("error", `Purchase failed: ${b.error.message}`);
+      return;
+    }
+    this.track(b.buy.contract_id);
+  }
+
+  private lastDecisionMeta: DecisionMeta | null = null;
+  private pendingMeta = new Map<
+    number,
+    DecisionMeta & { direction: Direction; symbol: string; digit: number }
+  >();
+  private track(contractId: number) {
+    const s = this.state;
+    const m = s.markets[s.active];
+    if (s.currentDirection && m) {
+      const entry = this.context(s.active);
+      const decision = this.lastDecisionMeta;
+      this.pendingMeta.set(contractId, {
+        direction: s.currentDirection,
+        symbol: s.active,
+        digit: lastDigit(m.quotes[m.quotes.length - 1], m.pip),
+        signalEpoch: decision?.signalEpoch ?? m.epochs.at(-1) ?? null,
+        analysis: decision?.analysis ?? m.analysis,
+        confirmation: decision?.confirmation ?? m.confirm,
+        pWin: decision?.pWin ?? this.probabilityFor(s.currentDirection, m),
+        expectedValue: decision?.expectedValue ?? this.expectedValueFor(s.currentDirection, m),
+        latencyMs: decision?.latencyMs ?? s.latencyMs,
+        tickAgeMs: decision?.tickAgeMs ?? (m.lastTickAt ? Date.now() - m.lastTickAt : null),
+        proposalAgeMs:
+          decision?.proposalAgeMs ?? (this.buySentAt ? Date.now() - this.buySentAt : null),
+        entryChecks: decision?.entryChecks ?? entry.checks,
+        proposalChecks: decision?.proposalChecks ?? s.proposalChecks,
+      });
+    }
+    this.lastDecisionMeta = null;
+    this.set({ phase: "open", contractId });
+    this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 });
+  }
+
+  private probabilityFor(direction: Direction, m: Market) {
+    const d = digitDistribution(
+      m.quotes.slice(-this.state.config.sampleSize).map((q) => lastDigit(q, m.pip)),
+    );
+    return direction === "OVER2" ? d.pOver2 : d.pUnder7;
+  }
+  private expectedValueFor(direction: Direction, m: Market) {
+    return expectedValue(
+      this.probabilityFor(direction, m),
+      this.state.config.stake,
+      this.state.config.stake * 1.33,
+    );
+  }
+
+  private createLossLog(c: any, rec: TradeRec, meta: ReturnType<Engine["getLossMeta"]>): LossLog {
+    const exitValue =
+      c.exit_tick_display_value === undefined ? null : String(c.exit_tick_display_value);
+    const exitDigit = exitValue === null ? null : Number(exitValue.slice(-1));
+    const weak = meta.analysis.difference < 10 || meta.confirmation.difference < 10;
+    const poorValue = meta.expectedValue <= 0;
+    const executionRisk =
+      (meta.latencyMs ?? 0) > this.state.config.maxLatencyMs ||
+      (meta.tickAgeMs ?? 0) > this.state.config.maxTickAgeMs;
+    const cause: LossCause = executionRisk
+      ? "execution-risk"
+      : poorValue
+        ? "poor-value"
+        : weak
+          ? "weak-signal"
+          : meta.analysis.moves < this.state.config.sampleSize
+            ? "insufficient-evidence"
+            : "normal-variance";
+    const reason =
+      cause === "execution-risk"
+        ? "Entry was exposed to high latency or stale market data."
+        : cause === "poor-value"
+          ? "The recorded historical probability did not support positive expected value."
+          : cause === "weak-signal"
+            ? "The directional edge was narrow at entry."
+            : cause === "insufficient-evidence"
+              ? "The signal had fewer observations than the configured sample size."
+              : "All recorded guards passed; the outcome is currently classified as normal one-tick variance.";
+    return {
+      id: rec.id,
+      time: rec.time,
+      symbol: rec.symbol,
+      direction: rec.direction,
+      entryDigit: rec.entryDigit,
+      exitDigit,
+      stake: rec.stake,
+      payout: rec.payout,
+      loss: Math.abs(rec.profit),
+      virtual: rec.virtual,
+      contractId: rec.contractId,
+      cause,
+      reason,
+      signalEpoch: meta.signalEpoch,
+      settledEpoch: c.exit_tick_time ? Number(c.exit_tick_time) : null,
+      analysis: meta.analysis,
+      confirmation: meta.confirmation,
+      pWin: meta.pWin,
+      expectedValue: meta.expectedValue,
+      latencyMs: meta.latencyMs,
+      tickAgeMs: meta.tickAgeMs,
+      proposalAgeMs: meta.proposalAgeMs,
+      entryChecks: meta.entryChecks,
+      proposalChecks: meta.proposalChecks,
+      consecutiveLosses: this.state.consecLosses + 1,
+      dailyPnl: this.state.day.pnl + rec.profit,
+    };
+  }
+  private getLossMeta(contractId: number) {
+    return (
+      this.pendingMeta.get(contractId) ?? {
+        signalEpoch: null,
+        analysis: emptyA,
+        confirmation: emptyA,
+        pWin: 0,
+        expectedValue: 0,
+        latencyMs: null,
+        tickAgeMs: null,
+        proposalAgeMs: null,
+        entryChecks: [],
+        proposalChecks: [],
+      }
+    );
+  }
+
+  private async reconcile() {
+    if (!this.state.connected || !this.state.authorized) return; // will run again on reconnect
+    if (this.state.contractId) {
+      this.send({ proposal_open_contract: 1, contract_id: this.state.contractId, subscribe: 1 });
+      this.set({ phase: "open" });
+      return;
+    }
+    const since = Math.floor(this.buySentAt / 1000) - 5;
+    const pf = await this.send({ portfolio: 1 });
+    const open = (pf.portfolio?.contracts ?? []).find((c: any) => c.purchase_time >= since);
+    if (open) {
+      this.log("info", `Reconciled open contract ${open.contract_id}.`);
+      this.track(open.contract_id);
+      return;
+    }
+    const pt = await this.send({ profit_table: 1, limit: 5, description: 1, sort: "DESC" });
+    if (pt.error) {
+      this.log("error", "Reconciliation failed — trading stays locked.");
+      return;
+    }
+    const done = (pt.profit_table?.transactions ?? []).find((c: any) => c.purchase_time >= since);
+    if (done) {
+      this.log("info", `Reconciled settled contract ${done.contract_id}.`);
+      this.track(done.contract_id);
+      return;
+    }
+    this.log("info", "Reconciled: no purchase was made.");
+    this.set({ phase: "none", currentDirection: null });
+  }
+
+  private onContract(c: any) {
+    if (c.contract_id !== this.state.contractId) return;
+    if (c.tick_count !== undefined && Number(c.tick_count) !== CONTRACT_DURATION)
+      this.log(
+        "error",
+        `ALERT — contract ${c.contract_id} reports ${c.tick_count} ticks (expected 1).`,
+      );
+    if (!c.is_sold) return;
+    const s = this.state;
+    const profit = Number(c.profit);
+    const won = profit > 0;
+    const meta = this.pendingMeta.get(c.contract_id);
+    const direction: Direction =
+      meta?.direction ?? (c.contract_type === "DIGITOVER" ? "OVER2" : "UNDER7");
+    const rec: TradeRec = {
+      id: String(c.contract_id),
+      time: Date.now(),
+      symbol: meta?.symbol ?? c.underlying,
+      direction,
+      entryDigit: meta?.digit ?? -1,
+      stake: Number(c.buy_price),
+      payout: Number(c.payout),
+      profit,
+      won,
+      virtual: !!s.account?.isVirtual,
+      contractId: c.contract_id,
+    };
+    if (s.trades.some((t) => t.id === rec.id)) return;
+    const cycle = s.cycle
+      ? {
+          ...s.cycle,
+          profit: s.cycle.profit + profit,
+          wins: s.cycle.wins + (won ? 1 : 0),
+          losses: s.cycle.losses + (won ? 0 : 1),
+          tradeIds: [...s.cycle.tradeIds, rec.id],
+        }
+      : null;
+    if (cycle) cycle.peak = Math.max(cycle.peak, cycle.start + cycle.profit);
+    const day =
+      s.day.date === today()
+        ? { ...s.day, pnl: s.day.pnl + profit }
+        : { date: today(), pnl: profit };
+    this.send({ forget_all: "proposal_open_contract" });
+    const lossLog = won ? null : this.createLossLog(c, rec, this.getLossMeta(c.contract_id));
+    const learning = this.recordLearning(rec);
+    this.set({
+      trades: [rec, ...s.trades],
+      lossLogs: lossLog ? [lossLog, ...s.lossLogs].slice(0, 300) : s.lossLogs,
+      learning,
+      cycle,
+      day,
+      consecLosses: won ? 0 : s.consecLosses + 1,
+      phase: "none",
+      contractId: null,
+      currentDirection: null,
+      lastSettledAt: Date.now(),
+    });
+    this.log(
+      "settle",
+      `SETTLED — ${CONTRACTS[direction].label} ${won ? "WON" : "LOST"} ${profit.toFixed(2)} (exit digit ${c.exit_tick_display_value ? String(c.exit_tick_display_value).slice(-1) : "?"}).`,
+    );
+    if (lossLog)
+      this.log("error", `LOSS JOURNAL — ${lossLog.id}: ${lossLog.cause}; ${lossLog.reason}`);
+    const learnedKey = this.learningKey(rec.symbol, rec.direction, rec.entryDigit);
+    const oldBlock = learningBlock(s.learning.patterns[learnedKey]);
+    const newBlock = learningBlock(learning.patterns[learnedKey]);
+    if (!oldBlock && newBlock)
+      this.log(
+        "info",
+        `LEARNING UPDATE — ${learnedKey} blocked after enough evidence of poor results. No more trades will use this pattern until history is cleared.`,
+      );
+    this.pendingMeta.delete(c.contract_id);
+    if (cycle && cycleComplete(cycle.start, cycle.profit)) this.completeCycle();
+    this.persist();
+  }
+
+  private completeCycle() {
+    const s = this.state;
+    const c = s.cycle!;
+    const rec: CycleRec = {
+      start: c.start,
+      end: c.start + c.profit,
+      profit: c.profit,
+      wins: c.wins,
+      losses: c.losses,
+      startedAt: c.startedAt,
+      endedAt: Date.now(),
+      tradeIds: c.tradeIds,
+    };
+    this.set({ cycles: [rec, ...s.cycles] });
+    this.log("info", `CYCLE COMPLETE — ${rec.start.toFixed(2)} → ${rec.end.toFixed(2)}.`);
+    if (s.config.autoRestart && s.status === "running") this.newCycle(rec.end);
+    else {
+      this.set({ cycle: null });
+      this.stop("Cycle target reached (auto-restart off)");
+    }
+  }
+  private newCycle(start: number) {
+    this.set({
+      cycle: {
+        start,
+        profit: 0,
+        wins: 0,
+        losses: 0,
+        startedAt: Date.now(),
+        tradeIds: [],
+        peak: start,
+      },
+    });
+    this.log(
+      "info",
+      `NEW CYCLE — start ${start.toFixed(2)}, target ${cycleTarget(start).toFixed(2)}, stake ${this.state.config.stake} (unchanged).`,
+    );
+  }
+
+  // ---------- controls ----------
+  start() {
+    const s = this.state;
+    if (!s.authorized || !s.account) {
+      this.log("error", "Connect and authorize a Deriv account first.");
+      return;
+    }
+    if (!s.account.isVirtual && !s.realEnabled) {
+      this.log("error", "This is a REAL account. Real trading is not enabled.");
+      return;
+    }
+    if (!s.cycle) this.newCycle(s.account.balance);
+    this.set({ status: "running", haltReason: null });
+    this.lastReject = "";
+    this.log("info", "Bot started.");
+  }
+  pause() {
+    this.set({ status: "paused" });
+    this.log("info", "Bot paused. Open trade (if any) will still settle.");
+  }
+  stop(reason = "Stopped by user") {
+    this.set({ status: "stopped", haltReason: reason });
+    this.log("info", `Bot stopped — ${reason}.`);
+  }
+  private halt(reason: string) {
+    this.set({ status: "stopped", haltReason: reason });
+    this.log("error", `TRADING HALTED — ${reason}.`);
+  }
+  emergency() {
+    this.set({ status: "emergency", haltReason: "Emergency stop" });
+    this.send({ forget_all: "proposal" });
+    this.log("error", "EMERGENCY STOP — no new trades. Open contract settles on Deriv.");
+  }
+  resetCycle() {
+    if (this.state.phase !== "none") return;
+    this.set({ cycle: null, consecLosses: 0 });
+    this.log("info", "Cycle tracking reset (account balance untouched).");
+  }
+  resetLearning() {
+    this.set({ learning: { total: 0, wins: 0, losses: 0, patterns: {}, updatedAt: null } });
+    this.log("info", "Learned model reset by user; loss journal was kept for review.");
+  }
+
+  runBacktest(symbol: string) {
+    const m = this.state.markets[symbol];
+    if (!m || m.quotes.length < 100) {
+      this.log("error", "Not enough history for backtest.");
+      return;
+    }
+    const c = this.state.config;
+    // Payouts estimated from the market's real recent proposals are not available offline; use typical Deriv payout ratios.
+    const r = backtest(m.quotes, m.pip, {
+      sampleSize: c.sampleSize,
+      minSample: c.minSample,
+      stake: c.stake,
+      payoutOver2: c.stake * 1.33,
+      payoutUnder7: c.stake * 1.33,
+      minEV: c.minEV,
+    });
+    this.set({ backtest: { ...r, symbol }, backtestDone: true });
+    this.persist();
+    this.log(
+      "info",
+      `BACKTEST ${symbol} — ${r.trades} trades, ${r.wins}W/${r.losses}L, net ${r.net}. Past results do not guarantee live profit.`,
+    );
+  }
+  clearHistory() {
+    this.set({ trades: [], cycles: [], lossLogs: [], logs: [] });
+    this.persist();
+  }
+  tickNow() {
+    if (this.state.connected) this.set({ checks: this.context(this.state.active).checks });
+  }
+}
+
+export const engine = new Engine();
+export { DEMO_TRADES_REQUIRED };

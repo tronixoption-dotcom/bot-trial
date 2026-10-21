@@ -50,6 +50,8 @@ export interface Config {
   doubleConfirmation: boolean;
   fastEntry: boolean;
   doubleAfterLoss: boolean;
+  skipAfterWins: number;
+  skipEntries: number;
   stake: number;
   maxDailyLoss: number;
   maxDrawdown: number;
@@ -176,6 +178,8 @@ export interface State {
   markets: Record<string, Market>;
   active: string;
   marketSwitchPendingLoss: boolean;
+  skipWins: number;
+  skipEntriesRemaining: number;
   phase: Phase;
   currentDirection: Direction | null;
   contractId: number | null;
@@ -234,6 +238,8 @@ export const defaultConfig: Config = {
   doubleConfirmation: true,
   fastEntry: false,
   doubleAfterLoss: false,
+  skipAfterWins: 0,
+  skipEntries: 0,
   stake: 1,
   maxDailyLoss: 10,
   maxDrawdown: 10,
@@ -266,6 +272,8 @@ class Engine {
     markets: {},
     active: "R_100",
     marketSwitchPendingLoss: false,
+    skipWins: 0,
+    skipEntriesRemaining: 0,
     phase: "none",
     currentDirection: null,
     contractId: null,
@@ -320,6 +328,8 @@ class Engine {
     const {
       config,
       marketSwitchPendingLoss,
+      skipWins,
+      skipEntriesRemaining,
       trades,
       cycles,
       lossLogs,
@@ -336,6 +346,8 @@ class Engine {
         JSON.stringify({
           config,
           marketSwitchPendingLoss,
+          skipWins,
+          skipEntriesRemaining,
           trades,
           cycles,
           lossLogs: lossLogs.slice(0, 300),
@@ -370,6 +382,11 @@ class Engine {
           ...s,
           config,
           marketSwitchPendingLoss: !!s.marketSwitchPendingLoss,
+          skipWins: Number.isInteger(s.skipWins) && s.skipWins > 0 ? s.skipWins : 0,
+          skipEntriesRemaining:
+            Number.isInteger(s.skipEntriesRemaining) && s.skipEntriesRemaining > 0
+              ? s.skipEntriesRemaining
+              : 0,
           lossLogs: Array.isArray(s.lossLogs) ? s.lossLogs : [],
           accumulator: { ...this.state.accumulator, ...(s.accumulator ?? {}) },
           learning: s.learning?.patterns
@@ -425,8 +442,16 @@ class Engine {
       this.log("error", "Accumulator growth must be between 1% and 5%.");
       delete p.accumulatorGrowthRate;
     }
+    for (const key of ["skipAfterWins", "skipEntries"] as const) {
+      if (p[key] !== undefined && (!Number.isInteger(p[key]) || p[key] < 0 || p[key] > 1000)) {
+        this.log("error", `${key} must be a whole number between 0 and 1000.`);
+        delete p[key];
+      }
+    }
     const config = { ...this.state.config, ...p };
     this.set({ config });
+    if (config.skipAfterWins === 0 || config.skipEntries === 0)
+      this.set({ skipWins: 0, skipEntriesRemaining: 0 });
     if (p.minDifference !== undefined) {
       const markets = Object.fromEntries(
         Object.entries(this.state.markets).map(([symbol, market]) => [
@@ -579,6 +604,8 @@ class Engine {
       contractMode: null,
       currentDirection: null,
       marketSwitchPendingLoss: false,
+      skipWins: 0,
+      skipEntriesRemaining: 0,
       phase: "none",
       haltReason: null,
     });
@@ -977,6 +1004,24 @@ class Engine {
     });
   }
 
+  private consumeSkippedEntry(label: string) {
+    const remaining = this.state.skipEntriesRemaining;
+    if (remaining <= 0) return false;
+    this.set({ skipEntriesRemaining: remaining - 1 });
+    this.log("info", `${label} ENTRY SKIPPED — ${remaining - 1} skip(s) remaining.`);
+    return true;
+  }
+
+  private skipStateAfterSettlement(won: boolean) {
+    const c = this.state.config;
+    if (c.skipAfterWins <= 0 || c.skipEntries <= 0) return { skipWins: 0, skipEntriesRemaining: 0 };
+    if (!won) return { skipWins: 0, skipEntriesRemaining: 0 };
+    const wins = this.state.skipWins + 1;
+    return wins >= c.skipAfterWins
+      ? { skipWins: 0, skipEntriesRemaining: c.skipEntries }
+      : { skipWins: wins };
+  }
+
   private evaluate() {
     const s = this.state;
     if (s.status !== "running") {
@@ -1009,6 +1054,7 @@ class Engine {
         accumulatorContext.checks.every((check) => check.pass)
       ) {
         this.set({ checks: accumulatorContext.checks });
+        if (this.consumeSkippedEntry("ACCUMULATOR")) return;
         this.attemptAccumulator(accumulatorSymbol, accumulatorContext.direction);
         return;
       }
@@ -1045,6 +1091,7 @@ class Engine {
       }
       return;
     }
+    if (this.consumeSkippedEntry(CONTRACTS[direction].label)) return;
     this.attempt(sym, direction, m.epochs[m.epochs.length - 1]);
   }
 
@@ -1559,6 +1606,7 @@ class Engine {
       contractMode: null,
       currentDirection: null,
       marketSwitchPendingLoss: !won,
+      ...this.skipStateAfterSettlement(won),
       consecLosses: won ? 0 : s.consecLosses + 1,
       lastSettledAt: Date.now(),
     });
@@ -1638,6 +1686,7 @@ class Engine {
       contractMode: null,
       currentDirection: null,
       marketSwitchPendingLoss: !won,
+      ...this.skipStateAfterSettlement(won),
       lastSettledAt: Date.now(),
     });
     this.log(

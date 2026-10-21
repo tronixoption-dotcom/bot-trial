@@ -379,6 +379,26 @@ function Controls({ s }: { s: State }) {
             onCheckedChange={(v) => engine.updateConfig({ doubleAfterLoss: v })}
           />
         </Field>
+        <Field l="Skip after consecutive wins">
+          <Input
+            type="number"
+            min="0"
+            max="1000"
+            step="1"
+            defaultValue={c.skipAfterWins}
+            onBlur={num("skipAfterWins")}
+          />
+        </Field>
+        <Field l="Entries to skip">
+          <Input
+            type="number"
+            min="0"
+            max="1000"
+            step="1"
+            defaultValue={c.skipEntries}
+            onBlur={num("skipEntries")}
+          />
+        </Field>
         <Field l="Duration">
           <div className="text-sm text-primary">
             {c.tradeMode === "accumulator"

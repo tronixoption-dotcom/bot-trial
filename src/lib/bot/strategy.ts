@@ -232,8 +232,7 @@ export function evaluateEntry(c: EntryContext): { checks: Check[]; direction: Di
       label: "Stake matches selected entry stake",
       pass:
         c.stake > 0 &&
-        (c.stake === c.fixedStake ||
-          (c.doubleAfterLoss === true && c.stake === c.fixedStake * 2)),
+        (c.stake === c.fixedStake || (c.doubleAfterLoss === true && c.stake === c.fixedStake * 2)),
       detail: `${c.stake}`,
     },
     {

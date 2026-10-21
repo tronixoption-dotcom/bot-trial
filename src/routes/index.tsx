@@ -472,6 +472,7 @@ function Controls({ s }: { s: State }) {
             <select
               className="h-9 w-full rounded-sm border border-input bg-background px-2 text-sm"
               value={c.manualSymbol}
+              disabled={busy}
               onChange={(e) => engine.updateConfig({ manualSymbol: e.target.value })}
             >
               {VOL_SYMBOLS.map((v) => (

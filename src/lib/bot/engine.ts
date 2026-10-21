@@ -452,6 +452,21 @@ class Engine {
     this.set({ config });
     if (config.skipAfterWins === 0 || config.skipEntries === 0)
       this.set({ skipWins: 0, skipEntriesRemaining: 0 });
+    if (
+      !config.autoSwitch &&
+      config.manualSymbol !== this.state.active &&
+      this.state.phase === "none"
+    ) {
+      const next = this.state.markets[config.manualSymbol];
+      if (next) {
+        const previous = this.state.markets[this.state.active];
+        this.set({ active: config.manualSymbol, marketSwitchPendingLoss: false });
+        this.log(
+          "switch",
+          `MANUAL MARKET — ${previous?.name ?? this.state.active} → ${next.name}.`,
+        );
+      }
+    }
     if (p.minDifference !== undefined) {
       const markets = Object.fromEntries(
         Object.entries(this.state.markets).map(([symbol, market]) => [

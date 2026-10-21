@@ -1645,6 +1645,7 @@ class Engine {
   private async groqGate(sym: string, direction: Direction, m: Market) {
     const ai = this.state.ai;
     if (!ai.enabled) return { pass: true, detail: "Disabled" };
+    if (ai.provider === "copilot") return { pass: true, detail: "Copilot selected" };
     if (!this.groqApiKey) return { pass: false, detail: "API key is not configured" };
     this.set({ ai: { ...ai, busy: true, error: null } });
     try {

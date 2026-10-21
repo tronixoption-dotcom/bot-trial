@@ -9,6 +9,7 @@ const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 const publicUrl = (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, "");
 const frontendOrigin = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").replace(/\/$/, "");
 const secureCookie = publicUrl.startsWith("https://") ? " Secure;" : "";
+const sessionSecret = process.env.SESSION_SECRET || clientSecret || "local-development-secret";
 const sessions = new Map();
 const states = new Map();
 const clients = new Map();
@@ -23,6 +24,28 @@ function cookieValue(request, name) {
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${name}=`))
     ?.slice(name.length + 1);
+}
+
+function sessionKey() {
+  return crypto.createHash("sha256").update(sessionSecret).digest();
+}
+
+function sealSession(session) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", sessionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(session), "utf8"), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64url");
+}
+
+function openSession(value) {
+  try {
+    const payload = Buffer.from(value, "base64url");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", sessionKey(), payload.subarray(0, 12));
+    decipher.setAuthTag(payload.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(payload.subarray(28)), decipher.final()]).toString("utf8"));
+  } catch {
+    return null;
+  }
 }
 
 function headers(extra = {}) {
@@ -51,9 +74,9 @@ async function jsonBody(request) {
 
 function sessionFor(request) {
   const id = cookieValue(request, "copilot_session");
-  const session = id ? sessions.get(id) : null;
+  const session = id ? openSession(id) || sessions.get(id) : null;
   if (!session || session.expiresAt < Date.now()) return null;
-  return { id, ...session };
+  return { id: session.id || id, ...session };
 }
 
 async function exchange(code) {
@@ -106,21 +129,47 @@ function parsePlan(text) {
 async function copilotPlan(session, input) {
   let client = clients.get(session.id);
   if (!client) {
-    client = new CopilotClient({ gitHubToken: session.token, useLoggedInUser: false });
-    await client.start();
+    client = new CopilotClient({
+      mode: "empty",
+      // Authentication belongs to the client, not the individual session.
+      // In particular, `gitHubToken` is not a createSession option in the SDK.
+      gitHubToken: session.token,
+      workingDirectory: "/tmp",
+      baseDirectory: "/tmp/copilot",
+      logLevel: "error",
+    });
+    await withTimeout(client.start(), 45_000, "Copilot runtime startup timed out");
     clients.set(session.id, client);
   }
   const copilotSession = await client.createSession({
     model: process.env.COPILOT_MODEL || "gpt-5.4",
+    // Empty mode requires every session to explicitly declare its tools.
+    // This planner does not need filesystem, shell, or other tools.
+    availableTools: [],
   });
-  const result = await copilotSession.sendAndWait({
-    prompt: `You are a conservative demo-only trading planner. Return exactly one JSON object and no markdown: {"symbol":"exact supplied symbol","direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. Choose NONE when evidence is weak. Never increase stake or promise profit. Input: ${JSON.stringify(input)}`,
-  });
-  await copilotSession.disconnect();
-  return parsePlan(result?.data?.content);
+  try {
+    const result = await withTimeout(
+      copilotSession.sendAndWait({
+        prompt: `You are a conservative demo-only trading planner. Return exactly one JSON object and no markdown: {"symbol":"exact supplied symbol","direction":"OVER2"|"UNDER7"|"NONE","confidence":0..1,"reason":"short explanation"}. Choose NONE when evidence is weak. Never increase stake or promise profit. Input: ${JSON.stringify(input)}`,
+      }),
+      45_000,
+      "Copilot response timed out",
+    );
+    return parsePlan(result?.data?.content);
+  } finally {
+    await copilotSession.disconnect().catch(() => {});
+  }
 }
 
-const server = http.createServer(async (request, response) => {
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+export async function handler(request, response) {
   const url = new URL(request.url, publicUrl);
   if (request.method === "OPTIONS") {
     response.writeHead(204, headers());
@@ -152,12 +201,13 @@ const server = http.createServer(async (request, response) => {
       const token = await exchange(url.searchParams.get("code"));
       const user = await githubUser(token);
       const id = crypto.randomBytes(32).toString("hex");
-      sessions.set(id, { token, login: user.login, expiresAt: Date.now() + 8 * 60 * 60_000 });
+      const session = { id, token, login: user.login, expiresAt: Date.now() + 8 * 60 * 60_000 };
+      sessions.set(id, session);
       response.writeHead(
         302,
         headers({
           Location: `${frontendOrigin}/?copilot=connected`,
-          "Set-Cookie": `copilot_session=${id}; HttpOnly;${secureCookie} SameSite=${secureCookie ? "None" : "Lax"}; Path=/; Max-Age=28800`,
+          "Set-Cookie": `copilot_session=${sealSession(session)}; HttpOnly;${secureCookie} SameSite=${secureCookie ? "None" : "Lax"}; Path=/; Max-Age=28800`,
         }),
       );
       response.end();
@@ -196,6 +246,11 @@ const server = http.createServer(async (request, response) => {
       error: error instanceof Error ? error.message : "Copilot service error",
     });
   }
-});
+}
 
-server.listen(port, () => console.log(`Copilot service listening on ${publicUrl}`));
+export default handler;
+
+if (!process.env.VERCEL) {
+  const server = http.createServer(handler);
+  server.listen(port, () => console.log(`Copilot service listening on ${publicUrl}`));
+}

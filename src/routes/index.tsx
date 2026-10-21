@@ -349,7 +349,7 @@ function Controls({ s }: { s: State }) {
         )}
         {c.tradeMode !== "accumulator" && (
           <>
-            <Field l="Fast entry mode">
+            <Field l="Quick execute mode">
               <Switch
                 checked={c.fastEntry}
                 onCheckedChange={(v) => engine.updateConfig({ fastEntry: v })}
@@ -357,8 +357,9 @@ function Controls({ s }: { s: State }) {
             </Field>
             {c.fastEntry && (
               <div className="rounded border border-warning p-2 text-xs text-warning">
-                Fast entry skips only the duplicate signal re-check after an entry is found.
-                Contract, proposal, balance, risk, and purchase safety checks remain active.
+                Quick execute buys immediately after the entry signal is accepted. It skips only
+                duplicate signal re-checks; contract, proposal, balance, risk, and purchase safety
+                checks remain active.
               </div>
             )}
           </>

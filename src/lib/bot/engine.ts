@@ -533,8 +533,44 @@ class Engine {
   }
   disconnect() {
     this.manualClose = true;
-    this.stop("Disconnected by user");
+    if (this.state.phase !== "none") {
+      this.stop("Disconnected by user; waiting for the active contract to settle");
+    } else {
+      this.resetDisconnectedSession();
+    }
     this.ws?.close();
+  }
+
+  private resetDisconnectedSession() {
+    this.set({
+      status: "idle",
+      connected: false,
+      authorized: false,
+      account: null,
+      accounts: [],
+      selectedAccount: null,
+      latencyMs: null,
+      cycle: null,
+      consecLosses: 0,
+      checks: [],
+      proposalChecks: [],
+      trades: [],
+      lossLogs: [],
+      cycles: [],
+      logs: [],
+      day: { date: today(), pnl: 0 },
+      contractId: null,
+      contractMode: null,
+      currentDirection: null,
+      phase: "none",
+      haltReason: null,
+    });
+    this.persist();
+    this.pending.forEach((r) => r({ error: { message: "Disconnected by user" } }));
+    this.pending.clear();
+    this.pendingMeta.clear();
+    this.lastDecisionMeta = null;
+    this.lastReject = "";
   }
   private async open() {
     const old = this.ws;
@@ -597,7 +633,7 @@ class Engine {
       this.pending.clear();
       if (this.state.phase === "buying" || this.state.phase === "open")
         this.set({ phase: "reconciling" });
-      this.log("error", "API connection lost — trading suspended.");
+      if (!this.manualClose) this.log("error", "API connection lost — trading suspended.");
       if (!this.manualClose) setTimeout(() => this.open(), 2000);
     };
   }
@@ -1092,8 +1128,7 @@ class Engine {
     pChecks.push({
       id: "p_revalidate",
       label: "All entry checks and direction re-pass",
-      pass:
-        again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy"),
+      pass: again.direction === direction && again.checks.every((k) => k.pass || k.id === "busy"),
       detail:
         again.direction !== direction
           ? "Signal direction changed"

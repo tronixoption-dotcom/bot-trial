@@ -54,6 +54,7 @@ export interface Config {
   skipEntries: number;
   stake: number;
   maxDailyLoss: number;
+  dailyProfitTarget: number;
   maxDrawdown: number;
   maxConsecLosses: number;
   sampleSize: number;
@@ -242,6 +243,7 @@ export const defaultConfig: Config = {
   skipEntries: 0,
   stake: 1,
   maxDailyLoss: 10,
+  dailyProfitTarget: 0,
   maxDrawdown: 10,
   maxConsecLosses: 5,
   sampleSize: 50,
@@ -418,6 +420,13 @@ class Engine {
     if (p.stake !== undefined && !(p.stake >= 0.35)) {
       this.log("error", "Stake must be at least 0.35.");
       delete p.stake;
+    }
+    if (
+      p.dailyProfitTarget !== undefined &&
+      (!Number.isFinite(p.dailyProfitTarget) || p.dailyProfitTarget < 0)
+    ) {
+      this.log("error", "Daily profit target must be 0 or greater.");
+      delete p.dailyProfitTarget;
     }
     if (
       p.minDifference !== undefined &&
@@ -1019,6 +1028,11 @@ class Engine {
     });
   }
 
+  private dailyTargetReached(pnl = this.state.day.pnl) {
+    const target = this.state.config.dailyProfitTarget;
+    return target > 0 && pnl >= target;
+  }
+
   private consumeSkippedEntry(label: string) {
     const remaining = this.state.skipEntriesRemaining;
     if (remaining <= 0) return false;
@@ -1041,6 +1055,10 @@ class Engine {
     const s = this.state;
     if (s.status !== "running") {
       this.set({ checks: this.context(s.active).checks });
+      return;
+    }
+    if (this.dailyTargetReached()) {
+      this.halt(`Daily take-profit target reached (${s.day.pnl.toFixed(2)}).`);
       return;
     }
     if (s.config.tradeMode === "accumulator") {
@@ -1627,6 +1645,8 @@ class Engine {
       "settle",
       `ACCUMULATOR SETTLED — ${won ? "PROFIT" : "LOSS"} ${profit.toFixed(2)}; sale ${soldFor.toFixed(2)}; ${rec.exitReason}.`,
     );
+    if (this.dailyTargetReached(day.pnl))
+      this.halt(`Daily take-profit target reached (${day.pnl.toFixed(2)}).`);
     if (!won)
       this.log(
         "error",
@@ -1710,6 +1730,8 @@ class Engine {
           : "?"
       }).`,
     );
+    if (this.dailyTargetReached(day.pnl))
+      this.halt(`Daily take-profit target reached (${day.pnl.toFixed(2)}).`);
     if (lossLog)
       this.log("error", `LOSS JOURNAL — ${lossLog.id}: ${lossLog.cause}; ${lossLog.reason}`);
     const learnedKey = this.learningKey(rec.symbol, rec.direction, rec.entryDigit);
@@ -1773,6 +1795,10 @@ class Engine {
     }
     if (!s.account.isVirtual && !s.realEnabled) {
       this.log("error", "This is a REAL account. Real trading is not enabled.");
+      return;
+    }
+    if (this.dailyTargetReached()) {
+      this.halt(`Daily take-profit target already reached (${s.day.pnl.toFixed(2)}).`);
       return;
     }
     if (!s.cycle) this.newCycle(s.account.balance);

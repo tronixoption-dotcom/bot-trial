@@ -403,6 +403,15 @@ function Controls({ s }: { s: State }) {
         <Field l="Max daily loss">
           <Input type="number" defaultValue={c.maxDailyLoss} onBlur={num("maxDailyLoss")} />
         </Field>
+        <Field l="Daily take-profit target (0 = off)">
+          <Input
+            type="number"
+            min="0"
+            step="0.01"
+            defaultValue={c.dailyProfitTarget}
+            onBlur={num("dailyProfitTarget")}
+          />
+        </Field>
         <Field l="Max drawdown">
           <Input type="number" defaultValue={c.maxDrawdown} onBlur={num("maxDrawdown")} />
         </Field>

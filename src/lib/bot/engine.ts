@@ -26,6 +26,7 @@ import {
   type LearningPattern,
   validateAccumulatorProposal,
 } from "./strategy";
+import { requestGroqSignal } from "./groq";
 
 export const VOL_SYMBOLS = [
   "R_10",
@@ -218,6 +219,14 @@ export interface State {
   backtestDone: boolean;
   backtest: (BacktestResult & { symbol: string }) | null;
   haltReason: string | null;
+  ai: {
+    enabled: boolean;
+    configured: boolean;
+    model: string;
+    busy: boolean;
+    lastDecision: string | null;
+    error: string | null;
+  };
 }
 
 const emptyA: Analysis = {
@@ -305,6 +314,14 @@ class Engine {
     backtestDone: false,
     backtest: null,
     haltReason: null,
+    ai: {
+      enabled: false,
+      configured: false,
+      model: "llama-3.3-70b-versatile",
+      busy: false,
+      lastDecision: null,
+      error: null,
+    },
   };
   private listeners = new Set<() => void>();
   private ws: WebSocket | null = null;
@@ -316,6 +333,7 @@ class Engine {
   private lastReject = "";
   private buySentAt = 0;
   private inited = false;
+  private groqApiKey = "";
 
   subscribe = (l: () => void) => {
     this.listeners.add(l);
@@ -511,6 +529,27 @@ class Engine {
   disableReal() {
     this.set({ realEnabled: false });
     this.log("info", "Real-money trading disabled.");
+  }
+
+  configureGroq(apiKey: string, model: string, enabled: boolean) {
+    this.groqApiKey = apiKey.trim();
+    const selectedModel = model.trim() || "llama-3.3-70b-versatile";
+    this.set({
+      ai: {
+        ...this.state.ai,
+        enabled,
+        configured: !!this.groqApiKey,
+        model: selectedModel,
+        error: null,
+      },
+    });
+  }
+
+  clearGroq() {
+    this.groqApiKey = "";
+    this.set({
+      ai: { ...this.state.ai, enabled: false, configured: false, busy: false, error: null },
+    });
   }
 
   // ---------- connection ----------
@@ -1222,6 +1261,19 @@ class Engine {
       contractMode: "over-under",
       proposalChecks: [],
     });
+    const aiGate = await this.groqGate(sym, direction, m);
+    if (!aiGate.pass) {
+      this.set({
+        phase: "none",
+        currentDirection: null,
+        contractMode: null,
+        proposalChecks: [
+          { id: "ai", label: "Groq AI decision", pass: false, detail: aiGate.detail },
+        ],
+      });
+      this.log("reject", `${CONTRACTS[direction].label} REJECTED — Groq AI: ${aiGate.detail}.`);
+      return;
+    }
     const req = buildProposalRequest(direction, sym, stake, s.account!.currency);
     const proposalSentAt = Date.now();
     const res = await this.send(req, 3000);
@@ -1307,6 +1359,42 @@ class Engine {
       return;
     }
     this.track(b.buy.contract_id);
+  }
+
+  private async groqGate(sym: string, direction: Direction, m: Market) {
+    const ai = this.state.ai;
+    if (!ai.enabled) return { pass: true, detail: "Disabled" };
+    if (!this.groqApiKey) return { pass: false, detail: "API key is not configured" };
+    this.set({ ai: { ...ai, busy: true, error: null } });
+    try {
+      const result = await requestGroqSignal(this.groqApiKey, ai.model, {
+        symbol: sym,
+        proposedDirection: direction,
+        analysis: m.analysis,
+        confirmation: m.confirm,
+        latestDigits: m.quotes.slice(-20).map((q) => lastDigit(q, m.pip)),
+        recentLosses: this.state.lossLogs.slice(0, 10).map((loss) => ({
+          cause: loss.cause,
+          expectedValue: loss.expectedValue,
+          direction: loss.direction,
+        })),
+      });
+      const accepted = result.direction === direction && result.confidence >= 0.5;
+      const detail = `${result.direction}, confidence ${(result.confidence * 100).toFixed(0)}%: ${result.reason}`;
+      this.set({
+        ai: {
+          ...this.state.ai,
+          busy: false,
+          lastDecision: detail,
+          error: accepted ? null : detail,
+        },
+      });
+      return { pass: accepted, detail };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Groq request failed";
+      this.set({ ai: { ...this.state.ai, busy: false, error: detail } });
+      return { pass: false, detail };
+    }
   }
 
   private lastDecisionMeta: DecisionMeta | null = null;

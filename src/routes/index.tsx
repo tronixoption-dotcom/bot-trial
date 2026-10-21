@@ -232,6 +232,8 @@ function Dashboard() {
 function Controls({ s }: { s: State }) {
   const [token, setToken] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [groqKey, setGroqKey] = useState("");
+  const [groqModel, setGroqModel] = useState(s.ai.model);
   const c = s.config;
   const busy = s.phase !== "none";
   const num = (k: keyof typeof c) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -287,6 +289,51 @@ function Controls({ s }: { s: State }) {
           For pat_ tokens, the App ID must be from an app you registered at developers.deriv.com.
           The token is kept in memory only. Demo is chosen by default.
         </p>
+      </div>
+
+      <div className="panel p-4 space-y-2">
+        <h3 className="label-xs">Groq AI gate</h3>
+        <p className="text-xs text-muted-foreground">
+          Groq may approve or reject the existing signal. It cannot bypass EV, proposal, balance,
+          risk, stake, or contract checks. The key is memory-only and is cleared on page reload.
+        </p>
+        <Input
+          type="password"
+          placeholder="Groq API key"
+          value={groqKey}
+          onChange={(e) => setGroqKey(e.target.value)}
+        />
+        <Input
+          placeholder="Model, e.g. llama-3.3-70b-versatile"
+          value={groqModel}
+          onChange={(e) => setGroqModel(e.target.value)}
+        />
+        <Switch
+          checked={s.ai.enabled}
+          disabled={!groqKey && !s.ai.configured}
+          onCheckedChange={(enabled) => engine.configureGroq(groqKey, groqModel, enabled)}
+        />
+        <div className="text-xs text-muted-foreground">
+          {s.ai.busy
+            ? "Groq is reviewing the signal..."
+            : s.ai.error
+              ? `AI rejected/error: ${s.ai.error}`
+              : s.ai.enabled
+                ? `Enabled · ${s.ai.model}`
+                : "Disabled"}
+        </div>
+        {s.ai.configured && (
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={() => {
+              setGroqKey("");
+              engine.clearGroq();
+            }}
+          >
+            Clear Groq key
+          </Button>
+        )}
       </div>
 
       <div className="panel p-4 grid grid-cols-2 gap-2">

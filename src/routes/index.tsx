@@ -358,8 +358,8 @@ function Controls({ s }: { s: State }) {
             {c.fastEntry && (
               <div className="rounded border border-warning p-2 text-xs text-warning">
                 Quick execute buys immediately after the entry signal is accepted. It skips only
-                duplicate signal re-checks; contract, proposal, balance, risk, and purchase safety
-                checks remain active.
+                duplicate signal, EV, and cooldown re-checks; contract, proposal, balance, risk,
+                one-active-trade, and purchase safety checks remain active. Use this on demo first.
               </div>
             )}
           </>

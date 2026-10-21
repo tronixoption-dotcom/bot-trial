@@ -852,7 +852,7 @@ class Engine {
     nm.reject = !nm.analysis.sufficient
       ? "Insufficient sample"
       : !nm.analysis.qualifies
-        ? `Difference ${nm.analysis.difference} < 5`
+        ? `Difference ${nm.analysis.difference} < ${this.state.config.minDifference}`
         : nm.confirm.direction !== nm.analysis.direction
           ? "Direction not double-confirmed"
           : "Qualifies";
@@ -869,24 +869,35 @@ class Engine {
       return;
     }
     const now = Date.now();
+    const allowsMode = (direction: Direction | null) =>
+      s.config.tradeMode === "auto-over-under" || s.config.tradeMode === "accumulator"
+        ? true
+        : s.config.tradeMode === "over-only"
+          ? direction === "OVER2"
+          : direction === "UNDER7";
     const ranked = rankMarkets(
-      Object.values(s.markets).map((m) => ({
-        ...m,
-        fresh: !!m.lastTickAt && now - m.lastTickAt <= s.config.maxTickAgeMs,
-        confirmed: m.confirm.direction === m.analysis.direction,
-      })),
+      Object.values(s.markets)
+        .filter((m) => allowsMode(m.analysis.direction))
+        .map((m) => ({
+          ...m,
+          fresh: !!m.lastTickAt && now - m.lastTickAt <= s.config.maxTickAgeMs,
+          confirmed:
+            s.config.fastEntry ||
+            !s.config.doubleConfirmation ||
+            m.confirm.direction === m.analysis.direction,
+        })),
     );
-    const cur = s.markets[s.active];
     const best = ranked[0];
+    const currentRanked = ranked.find((m) => m.symbol === s.active);
     if (
       best &&
       best.symbol !== s.active &&
-      (!cur || cur.reject !== "Qualifies" || best.analysis.difference > cur.analysis.difference)
+      (!currentRanked || best.analysis.difference > currentRanked.analysis.difference)
     ) {
       this.set({ active: best.symbol });
       this.log(
         "switch",
-        `MARKET SWITCHED — ${cur?.name ?? s.active}: ${cur?.reject ?? "unavailable"}. Now ${best.name} (difference ${best.analysis.difference}).`,
+        `MARKET SWITCHED — ${s.markets[s.active]?.name ?? s.active}: ${s.markets[s.active]?.reject ?? "unavailable"}. Now ${best.name} (${CONTRACTS[best.analysis.direction ?? "OVER2"].label}, difference ${best.analysis.difference}).`,
       );
       this.lastReject = "";
     }
@@ -931,11 +942,12 @@ class Engine {
       balance: s.account?.balance ?? null,
       busy: s.phase !== "none",
       riskBlock: rb,
-      cooldownRemainingMs: s.lastSettledAt + c.cooldownSec * 1000 - now,
+      cooldownRemainingMs: c.fastEntry ? 0 : s.lastSettledAt + c.cooldownSec * 1000 - now,
       realAccountBlocked: !!s.account && !s.account.isVirtual && !s.realEnabled,
       minDifference: c.minDifference,
       checkEntryDigit: c.tradeMode !== "accumulator",
-      requireConfirmation: c.tradeMode === "accumulator" ? true : c.doubleConfirmation,
+      requireConfirmation:
+        c.tradeMode === "accumulator" ? true : c.fastEntry ? false : c.doubleConfirmation,
       learningBlock: this.learnedBlock(
         sym,
         m?.analysis.direction ?? null,
@@ -1112,8 +1124,10 @@ class Engine {
     pChecks.push({
       id: "p_ev",
       label: `Expected value > ${s.config.minEV}`,
-      pass: ev > s.config.minEV,
-      detail: `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
+      pass: s.config.fastEntry || ev > s.config.minEV,
+      detail: s.config.fastEntry
+        ? `Skipped in quick-execute mode (EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"})`
+        : `EV ${isFinite(ev) ? ev.toFixed(3) : "n/a"} (p=${(pWin * 100).toFixed(1)}%)`,
     });
     // Revalidate everything right before purchase. Fast entry skips only the
     // duplicate signal checks; proposal and account safety checks remain active.
